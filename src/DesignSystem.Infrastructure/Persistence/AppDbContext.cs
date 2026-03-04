@@ -1,5 +1,6 @@
 using DesignSystem.Domain.Entities;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 namespace DesignSystem.Infrastructure.Persistence;
 
@@ -44,6 +45,27 @@ public sealed class AppDbContext : DbContext
         modelBuilder.Entity<DesignProject>()
             .Property(p => p.UserAdjustmentsJson)
             .HasColumnType("TEXT");
+
+        // SQLite does not support DateTimeOffset in ORDER BY.
+        // Store all DateTimeOffset values as long (Unix ms) so sorting works natively.
+        var dateTimeOffsetConverter = new ValueConverter<DateTimeOffset, long>(
+            v => v.ToUnixTimeMilliseconds(),
+            v => DateTimeOffset.FromUnixTimeMilliseconds(v));
+
+        var nullableDateTimeOffsetConverter = new ValueConverter<DateTimeOffset?, long?>(
+            v => v == null ? null : v.Value.ToUnixTimeMilliseconds(),
+            v => v == null ? null : DateTimeOffset.FromUnixTimeMilliseconds(v.Value));
+
+        foreach (var entityType in modelBuilder.Model.GetEntityTypes())
+        {
+            foreach (var property in entityType.GetProperties())
+            {
+                if (property.ClrType == typeof(DateTimeOffset))
+                    property.SetValueConverter(dateTimeOffsetConverter);
+                else if (property.ClrType == typeof(DateTimeOffset?))
+                    property.SetValueConverter(nullableDateTimeOffsetConverter);
+            }
+        }
 
         base.OnModelCreating(modelBuilder);
     }
