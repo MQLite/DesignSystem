@@ -6,6 +6,8 @@ public sealed class DesignProject
 {
     public Guid Id { get; set; } = Guid.NewGuid();
 
+    public ProductType ProductType { get; set; }
+
     public OccasionType OccasionType { get; set; }
 
     public Guid BackgroundLayoutId { get; set; }
@@ -23,6 +25,7 @@ public sealed class DesignProject
     public string? PreviewPath { get; set; }
     public string? ExportSvgPath { get; set; }
     public string? ExportPdfPath { get; set; }
+    public string? ExportPsdPath { get; set; }
 
     public ProjectStatus Status { get; set; } = ProjectStatus.Draft;
 

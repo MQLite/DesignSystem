@@ -20,11 +20,12 @@ Directory.CreateDirectory("./storage/processed");
 Directory.CreateDirectory("./storage/previews");
 Directory.CreateDirectory("./storage/exports");
 
-// PoC convenience: apply migrations automatically on startup
+// PoC convenience: apply migrations and seed automatically on startup
 using (var scope = app.Services.CreateScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
     db.Database.Migrate();
+    await AppDbContextSeeder.SeedAsync(db);
 }
 
 // if (app.Environment.IsDevelopment())
