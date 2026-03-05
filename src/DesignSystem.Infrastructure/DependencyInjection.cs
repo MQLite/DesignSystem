@@ -1,4 +1,5 @@
 using DesignSystem.Infrastructure.Persistence;
+using DesignSystem.Infrastructure.Rendering;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -15,6 +16,9 @@ public static class DependencyInjection
         {
             options.UseSqlite(conn);
         });
+
+        // Composer engine — scoped so it shares the request lifetime with DbContext
+        services.AddScoped<IComposerEngine, ComposerEngine>();
 
         return services;
     }
