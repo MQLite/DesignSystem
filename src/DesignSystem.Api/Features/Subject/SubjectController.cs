@@ -2,12 +2,18 @@ using DesignSystem.Domain.Entities;
 using DesignSystem.Infrastructure.Persistence;
 using Microsoft.AspNetCore.Mvc;
 
-namespace DesignSystem.Api.Controllers;
+namespace DesignSystem.Api.Features.Subject;
+
+// ── Request / Response types ─────────────────────────────────────────────────
 
 public sealed class UploadSubjectRequest
 {
     public IFormFile File { get; set; } = default!;
 }
+
+public record UploadSubjectResponse(Guid SubjectAssetId, string OriginalPath);
+
+// ── Controller ───────────────────────────────────────────────────────────────
 
 [ApiController]
 [Route("api/subject")]
@@ -25,7 +31,9 @@ public sealed class SubjectController : ControllerBase
     [HttpPost("upload")]
     [Consumes("multipart/form-data")]
     [RequestSizeLimit(20_000_000)]
-    public async Task<IActionResult> Upload([FromForm] UploadSubjectRequest request, CancellationToken ct)
+    public async Task<ActionResult<UploadSubjectResponse>> Upload(
+        [FromForm] UploadSubjectRequest request,
+        CancellationToken ct)
     {
         var file = request.File;
 
@@ -40,19 +48,12 @@ public sealed class SubjectController : ControllerBase
         var absPath = Path.Combine(_env.ContentRootPath, "storage", "uploads", $"{id}{ext}");
 
         await using (var stream = System.IO.File.Create(absPath))
-        {
             await file.CopyToAsync(stream, ct);
-        }
 
-        var asset = new SubjectAsset
-        {
-            Id = id,
-            OriginalPath = relPath
-        };
-
+        var asset = new SubjectAsset { Id = id, OriginalPath = relPath };
         _db.SubjectAssets.Add(asset);
         await _db.SaveChangesAsync(ct);
 
-        return Ok(new { subjectAssetId = asset.Id, originalPath = asset.OriginalPath });
+        return Ok(new UploadSubjectResponse(asset.Id, asset.OriginalPath));
     }
 }
