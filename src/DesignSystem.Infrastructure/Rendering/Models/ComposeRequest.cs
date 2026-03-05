@@ -4,7 +4,7 @@ namespace DesignSystem.Infrastructure.Rendering.Models;
 /// All inputs required by the composer engine to produce one output image.
 /// Keep this record free of DB entities — callers load data from DB and map here.
 /// </summary>
-public sealed class ComposeRequest
+public sealed record ComposeRequest
 {
     /// <summary>Relative path to the background source file, e.g. "storage/backgrounds/seeded/lily_source.png".</summary>
     public required string BackgroundSourcePath { get; init; }
