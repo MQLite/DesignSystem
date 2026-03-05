@@ -14,8 +14,13 @@ public sealed class UploadSubjectRequest
 public sealed class SubjectController : ControllerBase
 {
     private readonly AppDbContext _db;
+    private readonly IWebHostEnvironment _env;
 
-    public SubjectController(AppDbContext db) => _db = db;
+    public SubjectController(AppDbContext db, IWebHostEnvironment env)
+    {
+        _db = db;
+        _env = env;
+    }
 
     [HttpPost("upload")]
     [Consumes("multipart/form-data")]
@@ -31,8 +36,8 @@ public sealed class SubjectController : ControllerBase
         var ext = Path.GetExtension(file.FileName);
         if (string.IsNullOrWhiteSpace(ext)) ext = ".jpg";
 
-        var relPath = Path.Combine("storage", "uploads", $"{id}{ext}").Replace("\\", "/");
-        var absPath = Path.GetFullPath(relPath);
+        var relPath = $"storage/uploads/{id}{ext}";
+        var absPath = Path.Combine(_env.ContentRootPath, "storage", "uploads", $"{id}{ext}");
 
         await using (var stream = System.IO.File.Create(absPath))
         {
