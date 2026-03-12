@@ -12,4 +12,9 @@ public interface IComposerEngine
     /// Produces a preview PNG at 150 DPI and writes it to the storage/previews folder.
     /// </summary>
     Task<ComposeResult> ComposePreviewAsync(ComposeRequest request, CancellationToken ct = default);
+
+    /// <summary>
+    /// Produces a print-ready SVG export and writes it to the storage/exports folder.
+    /// </summary>
+    Task<ComposeResult> ExportSvgAsync(ComposeRequest request, CancellationToken ct = default);
 }

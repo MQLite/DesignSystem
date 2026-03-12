@@ -104,4 +104,54 @@ public sealed class ComposerEngine : IComposerEngine
             HeightPx: request.CanvasHeightPx,
             OutputType: "preview-png");
     }
+
+    /// <inheritdoc/>
+    public async Task<ComposeResult> ExportSvgAsync(
+        ComposeRequest request,
+        CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(request.BackgroundSourcePath))
+            throw new ArgumentException("BackgroundSourcePath is required.", nameof(request));
+
+        if (request.CanvasWidthPx <= 0 || request.CanvasHeightPx <= 0)
+            throw new ArgumentException(
+                $"Canvas dimensions must be positive (got {request.CanvasWidthPx}×{request.CanvasHeightPx}).",
+                nameof(request));
+
+        var exportDir = Path.Combine(request.StorageRootPath, "exports");
+        Directory.CreateDirectory(exportDir);
+
+        var fileName = $"{Guid.NewGuid():N}_export.svg";
+        var absOutputPath = Path.Combine(exportDir, fileName);
+        var relOutputPath = $"storage/exports/{fileName}";
+
+        // TODO (full implementation): compose all layers into a proper SVG document
+        //   - Embed background + subject images as base64 <image> elements
+        //   - Apply UserAdjustmentsJson (CanvasLayout) per-layer transforms
+        //   - Render text zones with font paths
+        var placeholderSvg =
+            $"""
+            <?xml version="1.0" encoding="UTF-8"?>
+            <!-- ComposerEngine SKELETON -->
+            <svg xmlns="http://www.w3.org/2000/svg"
+                 xmlns:xlink="http://www.w3.org/1999/xlink"
+                 width="{request.CanvasWidthPx}" height="{request.CanvasHeightPx}"
+                 viewBox="0 0 {request.CanvasWidthPx} {request.CanvasHeightPx}">
+              <!-- bg={request.BackgroundSourcePath} subject={request.SubjectCutoutPath ?? "(none)"} -->
+              <rect width="{request.CanvasWidthPx}" height="{request.CanvasHeightPx}" fill="#e5e7eb"/>
+              <text x="50%" y="50%" text-anchor="middle" dominant-baseline="middle"
+                    font-family="sans-serif" font-size="48" fill="#9ca3af">SVG Export Skeleton</text>
+            </svg>
+            """;
+
+        await File.WriteAllTextAsync(absOutputPath, placeholderSvg, ct);
+
+        _logger.LogInformation("Skeleton SVG export written → {RelPath}", relOutputPath);
+
+        return new ComposeResult(
+            OutputRelativePath: relOutputPath,
+            WidthPx: request.CanvasWidthPx,
+            HeightPx: request.CanvasHeightPx,
+            OutputType: "export-svg");
+    }
 }

@@ -12,10 +12,17 @@ namespace DesignSystem.Api.Features.Compose;
 public record ComposePreviewRequest(
     Guid BackgroundLayoutId,
     Guid? SubjectAssetId,
-    string? TextConfigJson);
+    string? TextConfigJson,
+    /// <summary>Serialised CanvasLayout JSON from the frontend interactive editor.</summary>
+    string? CanvasLayoutJson);
 
 public record ComposePreviewResponse(
     string PreviewRelativePath,
+    int WidthPx,
+    int HeightPx);
+
+public record ComposeExportResponse(
+    string ExportRelativePath,
     int WidthPx,
     int HeightPx);
 
@@ -81,6 +88,7 @@ public sealed class ComposeController : ControllerBase
             SubjectCutoutPath = subjectCutoutPath,
             SubjectSlotsJson = layout.SubjectSlotsJson,
             TextConfigJson = request.TextConfigJson ?? "{}",
+            UserAdjustmentsJson = request.CanvasLayoutJson,
             TargetDpi = previewDpi,
             CanvasWidthPx = canvasW,
             CanvasHeightPx = canvasH,
@@ -91,6 +99,57 @@ public sealed class ComposeController : ControllerBase
         var result = await _engine.ComposePreviewAsync(composeRequest, ct);
 
         return Ok(new ComposePreviewResponse(result.OutputRelativePath, result.WidthPx, result.HeightPx));
+    }
+
+    /// <summary>
+    /// Composes a print-ready SVG export (300 DPI equivalent) for the given layout.
+    /// Returns the relative path to the output SVG file.
+    /// </summary>
+    [HttpPost("export/svg")]
+    public async Task<ActionResult<ComposeExportResponse>> ExportSvg(
+        [FromBody] ComposePreviewRequest request,
+        CancellationToken ct)
+    {
+        var layout = await _db.BackgroundLayouts
+            .Include(l => l.Background)
+            .FirstOrDefaultAsync(l => l.Id == request.BackgroundLayoutId, ct);
+
+        if (layout is null)
+            return NotFound($"BackgroundLayout {request.BackgroundLayoutId} not found.");
+
+        if (layout.Background is null)
+            return Problem("BackgroundLayout has no associated Background record.");
+
+        string? subjectCutoutPath = null;
+        if (request.SubjectAssetId.HasValue)
+        {
+            var asset = await _db.SubjectAssets
+                .FirstOrDefaultAsync(a => a.Id == request.SubjectAssetId.Value, ct);
+            subjectCutoutPath = asset?.CutoutPath ?? asset?.OriginalPath;
+        }
+
+        const int exportDpi = 300;
+        int canvasW = MmToPx(layout.WidthMm, exportDpi);
+        int canvasH = MmToPx(layout.HeightMm, exportDpi);
+
+        var storageRoot = Path.Combine(_env.ContentRootPath, "storage");
+
+        var composeRequest = new ComposeRequest
+        {
+            BackgroundSourcePath = layout.Background.SourcePath,
+            SubjectCutoutPath = subjectCutoutPath,
+            SubjectSlotsJson = layout.SubjectSlotsJson,
+            TextConfigJson = request.TextConfigJson ?? "{}",
+            UserAdjustmentsJson = request.CanvasLayoutJson,
+            TargetDpi = exportDpi,
+            CanvasWidthPx = canvasW,
+            CanvasHeightPx = canvasH,
+            StorageRootPath = storageRoot,
+        };
+
+        var result = await _engine.ExportSvgAsync(composeRequest, ct);
+
+        return Ok(new ComposeExportResponse(result.OutputRelativePath, result.WidthPx, result.HeightPx));
     }
 
     // A3 at 150 DPI = round(297 / 25.4 * 150) = 1754 px wide
