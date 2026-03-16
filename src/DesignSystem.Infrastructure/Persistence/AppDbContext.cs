@@ -35,6 +35,10 @@ public sealed class AppDbContext : DbContext
             .HasColumnType("TEXT");
 
         modelBuilder.Entity<BackgroundLayout>()
+            .Property(l => l.SubjectCropFramesJson)
+            .HasColumnType("TEXT");
+
+        modelBuilder.Entity<BackgroundLayout>()
             .Property(l => l.TextZonesJson)
             .HasColumnType("TEXT");
 
@@ -44,6 +48,10 @@ public sealed class AppDbContext : DbContext
 
         modelBuilder.Entity<DesignProject>()
             .Property(p => p.UserAdjustmentsJson)
+            .HasColumnType("TEXT");
+
+        modelBuilder.Entity<DesignProject>()
+            .Property(p => p.SubjectCropStateJson)
             .HasColumnType("TEXT");
 
         // SQLite does not support DateTimeOffset in ORDER BY.

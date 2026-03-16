@@ -30,9 +30,20 @@ public sealed class BackgroundLayout
 
     /// <summary>
     /// JSON stored as TEXT in SQLite.
+    /// Defines where and how the subject image is placed on the final canvas.
     /// Expected to include normalized slot rects (x,y,w,h within 0..1).
     /// </summary>
     public string SubjectSlotsJson { get; set; } = "[]";
+
+    /// <summary>
+    /// JSON stored as TEXT in SQLite. Nullable — omit when no cropping is needed.
+    /// Defines the crop window(s) shown to the user when they adjust the subject photo,
+    /// using the same 0..1 normalized coordinate space as SubjectSlotsJson.
+    /// Each frame has an optional aspectRatio, shape, and allowUserMove/Scale flags.
+    /// Example: [{"id":"main-crop","x":0.20,"y":0.10,"w":0.60,"h":0.70,"shape":"rect",
+    ///            "aspectRatio":0.857,"allowUserMove":true,"allowUserScale":true}]
+    /// </summary>
+    public string? SubjectCropFramesJson { get; set; }
 
     /// <summary>
     /// Optional JSON for text safe zones etc.

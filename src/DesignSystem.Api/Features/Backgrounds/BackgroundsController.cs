@@ -12,6 +12,8 @@ public record LayoutSummary(
     string SizeCode,
     string Orientation,
     string SubjectSlotsJson,
+    /// <summary>Crop frame definition(s) for the subject image. Null when not defined.</summary>
+    string? SubjectCropFramesJson,
     string? TextZonesJson,
     int Version);
 
@@ -51,6 +53,7 @@ public sealed class BackgroundsController : ControllerBase
                     l.SizeCode,
                     l.Orientation,
                     l.SubjectSlotsJson,
+                    l.SubjectCropFramesJson,
                     l.TextZonesJson,
                     l.Version)).ToList()))
             .ToListAsync(ct);

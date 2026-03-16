@@ -22,6 +22,14 @@ public sealed class DesignProject
     // JSON stored as TEXT in SQLite (offset/scale, etc.)
     public string? UserAdjustmentsJson { get; set; }
 
+    /// <summary>
+    /// JSON stored as TEXT in SQLite. Nullable — populated when the user adjusts the crop frame.
+    /// Stores per-frame crop pan/zoom state, keyed by SubjectCropFrame.Id.
+    /// Intentionally separate from UserAdjustmentsJson (which holds whole-canvas CanvasLayout transforms).
+    /// Example: [{"cropFrameId":"main-crop","offsetX":0.0,"offsetY":0.0,"scale":1.0}]
+    /// </summary>
+    public string? SubjectCropStateJson { get; set; }
+
     public string? PreviewPath { get; set; }
     public string? ExportSvgPath { get; set; }
     public string? ExportPdfPath { get; set; }

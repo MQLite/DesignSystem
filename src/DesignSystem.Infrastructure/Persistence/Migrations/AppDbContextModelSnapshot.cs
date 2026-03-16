@@ -80,6 +80,9 @@ namespace DesignSystem.Infrastructure.Persistence.Migrations
                         .IsRequired()
                         .HasColumnType("TEXT");
 
+                    b.Property<string>("SubjectCropFramesJson")
+                        .HasColumnType("TEXT");
+
                     b.Property<string>("SubjectSlotsJson")
                         .IsRequired()
                         .HasColumnType("TEXT");
@@ -142,6 +145,9 @@ namespace DesignSystem.Infrastructure.Persistence.Migrations
 
                     b.Property<long>("UpdatedAt")
                         .HasColumnType("INTEGER");
+
+                    b.Property<string>("SubjectCropStateJson")
+                        .HasColumnType("TEXT");
 
                     b.Property<string>("UserAdjustmentsJson")
                         .HasColumnType("TEXT");
