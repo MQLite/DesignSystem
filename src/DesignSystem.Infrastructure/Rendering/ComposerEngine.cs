@@ -31,14 +31,18 @@ public sealed class ComposerEngine : IComposerEngine
         if (string.IsNullOrWhiteSpace(request.StorageRootPath))
             throw new ArgumentException("StorageRootPath is required.", nameof(request));
 
-        // ── 2. Parse subject slots ───────────────────────────────────────────
-        var slots = SlotParser.Parse(request.SubjectSlotsJson);
-        _logger.LogDebug("Parsed {Count} subject slot(s) from layout.", slots.Count);
+        // ── 2. Parse subject slots, crop frames and crop state ───────────────
+        var slots      = SlotParser.Parse(request.SubjectSlotsJson);
+        var cropFrames = CropFrameParser.Parse(request.SubjectCropFramesJson);
+        var cropStates = CropStateParser.Parse(request.SubjectCropStateJson);
+        _logger.LogDebug(
+            "Parsed {SlotCount} slot(s), {CropCount} crop frame(s) from layout.",
+            slots.Count, cropFrames.Count);
 
-        // ── 3. Compute subject placement (no drawing yet) ────────────────────
+        // ── 3. Compute subject placement and crop ────────────────────────────
         if (slots.Count > 0 && request.SubjectCutoutPath is not null)
         {
-            // TODO (ImageSharp): load actual subject image dimensions:
+            // TODO (ImageSharp — Step A): load actual subject image dimensions:
             //   var absSubject = Path.Combine(request.StorageRootPath, "..", request.SubjectCutoutPath);
             //   using var subjectImg = await Image.LoadAsync<Rgba32>(absSubject, ct);
             //   int srcW = subjectImg.Width;
@@ -47,6 +51,42 @@ public sealed class ComposerEngine : IComposerEngine
             // Skeleton: use placeholder dimensions until real image loading is implemented
             const int placeholderW = 800;
             const int placeholderH = 1200;
+
+            // TODO (ImageSharp — Step B): apply crop frame + user crop state BEFORE placement.
+            //   When a matching crop frame exists for slot[0]:
+            //
+            //   var primaryFrame = cropFrames.FirstOrDefault(f => f.Id == "main-crop");
+            //   if (primaryFrame is not null)
+            //   {
+            //       var cropState = CropStateParser.GetOrDefault(cropStates, primaryFrame.Id);
+            //
+            //       // Crop viewport in canvas pixels
+            //       int cropX = (int)(primaryFrame.Rect.X * request.CanvasWidthPx);
+            //       int cropY = (int)(primaryFrame.Rect.Y * request.CanvasHeightPx);
+            //       int cropW = (int)(primaryFrame.Rect.W * request.CanvasWidthPx);
+            //       int cropH = (int)(primaryFrame.Rect.H * request.CanvasHeightPx);
+            //
+            //       // Cover-fit: scale the subject so it fills the crop viewport
+            //       double coverScale = Math.Max((double)cropW / srcW, (double)cropH / srcH);
+            //       double finalScale = coverScale * cropState.Scale;
+            //
+            //       // Pan offset in source pixels
+            //       int panX = (int)(cropState.OffsetX * cropW / finalScale);
+            //       int panY = (int)(cropState.OffsetY * cropH / finalScale);
+            //
+            //       // Crop source rect centred on pan offset
+            //       int srcCropX = (int)(srcW / 2.0 - cropW / finalScale / 2.0) + panX;
+            //       int srcCropY = (int)(srcH / 2.0 - cropH / finalScale / 2.0) + panY;
+            //       int srcCropW = (int)(cropW / finalScale);
+            //       int srcCropH = (int)(cropH / finalScale);
+            //
+            //       // Apply: subjectImg.Mutate(ctx => ctx
+            //       //     .Crop(new Rectangle(srcCropX, srcCropY, srcCropW, srcCropH))
+            //       //     .Resize(cropW, cropH));
+            //
+            //       // After crop the effective dimensions are (cropW, cropH)
+            //       // srcW = cropW; srcH = cropH;
+            //   }
 
             var placement = LayoutCalculator.CalculatePlacement(
                 placeholderW, placeholderH,
@@ -126,6 +166,9 @@ public sealed class ComposerEngine : IComposerEngine
         var relOutputPath = $"storage/exports/{fileName}";
 
         // TODO (full implementation): compose all layers into a proper SVG document
+        //   - Parse crop frames + state: CropFrameParser.Parse(request.SubjectCropFramesJson)
+        //     and CropStateParser.Parse(request.SubjectCropStateJson)
+        //   - Apply crop (see ComposePreviewAsync Step B TODO) before embedding subject image
         //   - Embed background + subject images as base64 <image> elements
         //   - Apply UserAdjustmentsJson (CanvasLayout) per-layer transforms
         //   - Render text zones with font paths

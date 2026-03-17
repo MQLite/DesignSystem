@@ -14,7 +14,9 @@ public record ComposePreviewRequest(
     Guid? SubjectAssetId,
     string? TextConfigJson,
     /// <summary>Serialised CanvasLayout JSON from the frontend interactive editor.</summary>
-    string? CanvasLayoutJson);
+    string? CanvasLayoutJson,
+    /// <summary>Serialised SubjectCropState[] — user's pan/zoom within each crop frame. Null when not adjusted.</summary>
+    string? SubjectCropStateJson);
 
 public record ComposePreviewResponse(
     string PreviewRelativePath,
@@ -87,8 +89,10 @@ public sealed class ComposeController : ControllerBase
             BackgroundSourcePath = layout.Background.SourcePath,
             SubjectCutoutPath = subjectCutoutPath,
             SubjectSlotsJson = layout.SubjectSlotsJson,
+            SubjectCropFramesJson = layout.SubjectCropFramesJson,
             TextConfigJson = request.TextConfigJson ?? "{}",
             UserAdjustmentsJson = request.CanvasLayoutJson,
+            SubjectCropStateJson = request.SubjectCropStateJson,
             TargetDpi = previewDpi,
             CanvasWidthPx = canvasW,
             CanvasHeightPx = canvasH,
@@ -139,8 +143,10 @@ public sealed class ComposeController : ControllerBase
             BackgroundSourcePath = layout.Background.SourcePath,
             SubjectCutoutPath = subjectCutoutPath,
             SubjectSlotsJson = layout.SubjectSlotsJson,
+            SubjectCropFramesJson = layout.SubjectCropFramesJson,
             TextConfigJson = request.TextConfigJson ?? "{}",
             UserAdjustmentsJson = request.CanvasLayoutJson,
+            SubjectCropStateJson = request.SubjectCropStateJson,
             TargetDpi = exportDpi,
             CanvasWidthPx = canvasW,
             CanvasHeightPx = canvasH,

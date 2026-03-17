@@ -32,6 +32,18 @@ public sealed record ComposeRequest
     public string? UserAdjustmentsJson { get; init; }
 
     /// <summary>
+    /// Raw JSON from BackgroundLayout.SubjectCropFramesJson.
+    /// Defines the crop window(s) for the subject image. Null when the template has no crop frame.
+    /// </summary>
+    public string? SubjectCropFramesJson { get; init; }
+
+    /// <summary>
+    /// Serialised SubjectCropState[] from the frontend — user's pan/zoom within each crop frame.
+    /// Null when the user has not adjusted the crop. Engine applies this before placing the subject.
+    /// </summary>
+    public string? SubjectCropStateJson { get; init; }
+
+    /// <summary>
     /// Absolute path to the storage root (ContentRootPath + "storage").
     /// Provided by the caller (API layer) so the engine stays host-independent.
     /// </summary>
