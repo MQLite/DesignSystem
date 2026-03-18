@@ -23,7 +23,6 @@ builder.Services.AddInfrastructure(builder.Configuration);
 var app = builder.Build();
 
 var root = app.Environment.ContentRootPath;
-Directory.CreateDirectory(Path.Combine(root, "data"));
 Directory.CreateDirectory(Path.Combine(root, "storage"));
 Directory.CreateDirectory(Path.Combine(root, "storage", "backgrounds"));
 Directory.CreateDirectory(Path.Combine(root, "storage", "uploads"));

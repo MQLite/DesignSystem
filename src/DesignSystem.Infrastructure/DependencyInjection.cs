@@ -10,11 +10,12 @@ public static class DependencyInjection
 {
     public static IServiceCollection AddInfrastructure(this IServiceCollection services, IConfiguration config)
     {
-        var conn = config.GetConnectionString("AppDb") ?? "Data Source=./data/app.db";
+        var conn = config.GetConnectionString("AppDb")
+            ?? "Server=localhost;Database=DesignSystem;Trusted_Connection=True;TrustServerCertificate=True;";
 
         services.AddDbContext<AppDbContext>(options =>
         {
-            options.UseSqlite(conn);
+            options.UseSqlServer(conn);
         });
 
         // Composer engine — scoped so it shares the request lifetime with DbContext
