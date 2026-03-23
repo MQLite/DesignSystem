@@ -12,6 +12,19 @@ public record SubjectSlot
     public RectN Rect { get; init; } = new(0, 0, 1, 1);
 
     /// <summary>
+    /// Mask shape: "rect" (default) | "ellipse" | "polygon".
+    /// For "polygon", <see cref="Points"/> must be provided.
+    /// </summary>
+    public string Shape { get; init; } = "rect";
+
+    /// <summary>
+    /// Polygon vertices in canvas-normalized coordinates [[x, y], ...].
+    /// Only used when <see cref="Shape"/> is "polygon".
+    /// The bounding box is stored in <see cref="Rect"/>.
+    /// </summary>
+    public double[][]? Points { get; init; }
+
+    /// <summary>
     /// Anchor point for placement inside the slot.
     /// Supported: "BottomCenter" | "Center" | "TopCenter"
     /// </summary>

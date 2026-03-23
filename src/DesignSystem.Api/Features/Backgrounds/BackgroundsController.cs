@@ -38,26 +38,27 @@ public sealed class BackgroundsController : ControllerBase
     [HttpGet]
     public async Task<ActionResult<IReadOnlyList<BackgroundSummary>>> GetAll(CancellationToken ct)
     {
-        var items = await _db.Backgrounds
+        var rows = await _db.Backgrounds
             .AsNoTracking()
             .Include(b => b.Layouts)
             .OrderByDescending(b => b.CreatedAt)
-            .Select(b => new BackgroundSummary(
-                b.Id,
-                b.Name,
-                b.OccasionType,
-                b.PreviewPath,
-                b.SourcePath,
-                b.Layouts.Select(l => new LayoutSummary(
-                    l.Id,
-                    l.SizeCode,
-                    l.WidthMm,
-                    l.HeightMm,
-                    l.Orientation,
-                    l.SubjectSlotsJson,
-                    l.TextZonesJson,
-                    l.Version)).ToList()))
             .ToListAsync(ct);
+
+        var items = rows.Select(b => new BackgroundSummary(
+            b.Id,
+            b.Name,
+            b.OccasionType,
+            b.PreviewPath,
+            b.SourcePath,
+            b.Layouts.Select(l => new LayoutSummary(
+                l.Id,
+                l.SizeCode,
+                l.WidthMm,
+                l.HeightMm,
+                l.Orientation,
+                l.SubjectSlotsJson,
+                l.TextZonesJson,
+                l.Version)).ToList())).ToList();
 
         return Ok(items);
     }

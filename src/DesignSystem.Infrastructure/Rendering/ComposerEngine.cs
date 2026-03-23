@@ -122,7 +122,13 @@ public sealed class ComposerEngine : IComposerEngine
                     using (cropped)
                     {
                         var subUri = await ToDataUriAsync(cropped, ct);
-                        svg.AppendLine($"""  <image x="{dstX}" y="{dstY}" width="{drawW}" height="{drawH}" href="{subUri}"/>""");
+                        // Emit <defs> with clip path for non-rect shapes
+                        const string clipId = "slot_clip_0";
+                        var clipPathSvg = BuildSvgClipPath(clipId, slot, cw, ch, dstX, dstY, drawW, drawH);
+                        if (clipPathSvg is not null)
+                            svg.AppendLine($"""  <defs>{clipPathSvg}</defs>""");
+                        var clipAttr = clipPathSvg is not null ? $""" clip-path="url(#{clipId})" """ : " ";
+                        svg.AppendLine($"""  <image x="{dstX}" y="{dstY}" width="{drawW}" height="{drawH}"{clipAttr}href="{subUri}"/>""");
                     }
                 }
             }
@@ -235,6 +241,9 @@ public sealed class ComposerEngine : IComposerEngine
 
             int dstX = cropX + (cropW - subject.Width)  / 2;
             int dstY = cropY + (cropH - subject.Height) / 2;
+
+            // Apply non-rectangular shape mask (ellipse / polygon)
+            ApplyShapeMask(subject, slot, cw, ch, dstX, dstY);
 
             _logger.LogInformation(
                 "Subject cropped — slot({CX},{CY},{CW},{CH}) src({SW}×{SH}) " +
@@ -496,6 +505,95 @@ public sealed class ComposerEngine : IComposerEngine
             ? relativePath[prefix.Length..]
             : relativePath;
         return Path.GetFullPath(Path.Combine(storageRoot, suffix));
+    }
+
+    // ── Shape masking ─────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Applies a shape mask to the composited subject image by zeroing the alpha channel
+    /// of pixels that fall outside the slot's defined shape (ellipse or polygon).
+    /// For "rect" this is a no-op — the crop boundary already clips correctly.
+    /// </summary>
+    /// <param name="dstX">Canvas-pixel X where the image will be drawn (= image origin).</param>
+    /// <param name="dstY">Canvas-pixel Y where the image will be drawn (= image origin).</param>
+    private static void ApplyShapeMask(
+        Image<Rgba32> img, SubjectSlot slot,
+        int cw, int ch, int dstX, int dstY)
+    {
+        if (slot.Shape == "ellipse")
+        {
+            // Ellipse centred and inscribed within the image bounding box
+            float cx = img.Width  / 2f;
+            float cy = img.Height / 2f;
+            float rx = img.Width  / 2f;
+            float ry = img.Height / 2f;
+            img.ProcessPixelRows(accessor =>
+            {
+                for (int y = 0; y < img.Height; y++)
+                {
+                    var row = accessor.GetRowSpan(y);
+                    for (int x = 0; x < img.Width; x++)
+                    {
+                        float dx = (x - cx) / rx;
+                        float dy = (y - cy) / ry;
+                        if (dx * dx + dy * dy > 1f)
+                            row[x] = new Rgba32(0, 0, 0, 0);
+                    }
+                }
+            });
+        }
+        else if (slot.Shape == "polygon" && slot.Points is { Length: >= 3 })
+        {
+            // Convert canvas-normalized polygon points to image-local pixel coordinates.
+            // The image occupies canvas pixels starting at (dstX, dstY), so:
+            //   imageX = p[0] * cw - dstX
+            //   imageY = p[1] * ch - dstY
+            var polyPts = slot.Points
+                .Select(p => new PointF((float)(p[0] * cw - dstX), (float)(p[1] * ch - dstY)))
+                .ToArray();
+
+            // Rasterise a white filled polygon onto a transparent mask
+            using var mask = new Image<Rgba32>(img.Width, img.Height, Color.Transparent);
+            mask.Mutate(ctx => ctx.FillPolygon(Color.White, polyPts));
+
+            // Zero alpha where the mask is transparent
+            img.ProcessPixelRows(mask, (imgAcc, maskAcc) =>
+            {
+                for (int y = 0; y < img.Height; y++)
+                {
+                    var imgRow  = imgAcc.GetRowSpan(y);
+                    var maskRow = maskAcc.GetRowSpan(y);
+                    for (int x = 0; x < img.Width; x++)
+                    {
+                        if (maskRow[x].A == 0)
+                            imgRow[x] = new Rgba32(0, 0, 0, 0);
+                    }
+                }
+            });
+        }
+        // "rect": no masking — the bounding-box crop already defines the boundary
+    }
+
+    /// <summary>
+    /// Builds an SVG &lt;clipPath&gt; element string for the given slot shape, or null for "rect".
+    /// Coordinates are in canvas pixels (SVG user-coordinate space).
+    /// </summary>
+    private static string? BuildSvgClipPath(
+        string id, SubjectSlot slot,
+        int cw, int ch, int dstX, int dstY, int drawW, int drawH)
+    {
+        if (slot.Shape == "ellipse")
+        {
+            int cx = dstX + drawW / 2;
+            int cy = dstY + drawH / 2;
+            return $"""<clipPath id="{id}"><ellipse cx="{cx}" cy="{cy}" rx="{drawW / 2}" ry="{drawH / 2}"/></clipPath>""";
+        }
+        if (slot.Shape == "polygon" && slot.Points is { Length: >= 3 })
+        {
+            var pts = string.Join(" ", slot.Points.Select(p => $"{p[0] * cw:F1},{p[1] * ch:F1}"));
+            return $"""<clipPath id="{id}"><polygon points="{pts}"/></clipPath>""";
+        }
+        return null;
     }
 
     // ── DTOs used only within this file ──────────────────────────────────────

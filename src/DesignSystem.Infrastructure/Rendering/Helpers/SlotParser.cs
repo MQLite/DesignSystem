@@ -31,6 +31,8 @@ public static class SlotParser
                 // Seed data slots may omit Id — generate one from index
                 Id = string.IsNullOrWhiteSpace(r.Id) ? $"slot_{i}" : r.Id,
                 Rect = new RectN(r.X, r.Y, r.W, r.H),
+                Shape = r.Shape ?? "rect",
+                Points = r.Points,
                 Anchor = r.Anchor ?? "BottomCenter",
                 FitMode = r.FitMode ?? "Contain",
                 AllowUserMove = r.AllowUserMove ?? true,
@@ -56,6 +58,12 @@ public static class SlotParser
         public double Y { get; set; }
         public double W { get; set; }
         public double H { get; set; }
+
+        // Optional shape
+        public string? Shape { get; set; }
+
+        [JsonPropertyName("points")]
+        public double[][]? Points { get; set; }
 
         // Optional overrides
         public string? Anchor { get; set; }
