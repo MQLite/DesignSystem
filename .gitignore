@@ -6,3 +6,5 @@ storage/
 .claude/
 *.user
 *.suo
+appsettings.Development.json
+appsettings.*.local.json
