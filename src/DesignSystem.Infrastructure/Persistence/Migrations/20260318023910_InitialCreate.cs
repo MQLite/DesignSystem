@@ -64,7 +64,6 @@ namespace DesignSystem.Infrastructure.Persistence.Migrations
                     HeightMm = table.Column<int>(type: "int", nullable: false),
                     Orientation = table.Column<string>(type: "nvarchar(max)", nullable: false),
                     SubjectSlotsJson = table.Column<string>(type: "nvarchar(max)", nullable: false),
-                    SubjectCropFramesJson = table.Column<string>(type: "nvarchar(max)", nullable: true),
                     TextZonesJson = table.Column<string>(type: "nvarchar(max)", nullable: true),
                     Version = table.Column<int>(type: "int", nullable: false),
                     CreatedAt = table.Column<DateTimeOffset>(type: "datetimeoffset", nullable: false)

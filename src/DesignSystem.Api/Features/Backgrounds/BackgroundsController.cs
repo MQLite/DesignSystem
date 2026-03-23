@@ -10,10 +10,10 @@ namespace DesignSystem.Api.Features.Backgrounds;
 public record LayoutSummary(
     Guid Id,
     string SizeCode,
+    int WidthMm,
+    int HeightMm,
     string Orientation,
     string SubjectSlotsJson,
-    /// <summary>Crop frame definition(s) for the subject image. Null when not defined.</summary>
-    string? SubjectCropFramesJson,
     string? TextZonesJson,
     int Version);
 
@@ -51,9 +51,10 @@ public sealed class BackgroundsController : ControllerBase
                 b.Layouts.Select(l => new LayoutSummary(
                     l.Id,
                     l.SizeCode,
+                    l.WidthMm,
+                    l.HeightMm,
                     l.Orientation,
                     l.SubjectSlotsJson,
-                    l.SubjectCropFramesJson,
                     l.TextZonesJson,
                     l.Version)).ToList()))
             .ToListAsync(ct);

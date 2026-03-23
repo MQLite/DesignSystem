@@ -15,7 +15,6 @@ public record AdminLayoutDetail(
     int HeightMm,
     string Orientation,
     string SubjectSlotsJson,
-    string? SubjectCropFramesJson,
     string? TextZonesJson,
     int Version);
 
@@ -38,7 +37,6 @@ public record CreateAdminLayoutRequest(
     int HeightMm,
     string Orientation,
     string SubjectSlotsJson,
-    string? SubjectCropFramesJson,
     string? TextZonesJson);
 
 public record UpdateAdminLayoutRequest(
@@ -47,7 +45,6 @@ public record UpdateAdminLayoutRequest(
     int HeightMm,
     string Orientation,
     string SubjectSlotsJson,
-    string? SubjectCropFramesJson,
     string? TextZonesJson);
 
 // ── Controller ─────────────────────────────────────────────────────────────────
@@ -219,9 +216,8 @@ public sealed class AdminBackgroundsController : ControllerBase
             WidthMm               = request.WidthMm,
             HeightMm              = request.HeightMm,
             Orientation           = request.Orientation,
-            SubjectSlotsJson      = request.SubjectSlotsJson,
-            SubjectCropFramesJson = request.SubjectCropFramesJson,
-            TextZonesJson         = request.TextZonesJson,
+            SubjectSlotsJson = request.SubjectSlotsJson,
+            TextZonesJson    = request.TextZonesJson,
         };
 
         _db.BackgroundLayouts.Add(layout);
@@ -248,9 +244,8 @@ public sealed class AdminBackgroundsController : ControllerBase
         layout.WidthMm               = request.WidthMm;
         layout.HeightMm              = request.HeightMm;
         layout.Orientation           = request.Orientation;
-        layout.SubjectSlotsJson      = request.SubjectSlotsJson;
-        layout.SubjectCropFramesJson = request.SubjectCropFramesJson;
-        layout.TextZonesJson         = request.TextZonesJson;
+        layout.SubjectSlotsJson = request.SubjectSlotsJson;
+        layout.TextZonesJson    = request.TextZonesJson;
         layout.Version++;
 
         await _db.SaveChangesAsync(ct);
@@ -294,7 +289,6 @@ public sealed class AdminBackgroundsController : ControllerBase
         l.HeightMm,
         l.Orientation,
         l.SubjectSlotsJson,
-        l.SubjectCropFramesJson,
         l.TextZonesJson,
         l.Version);
 }

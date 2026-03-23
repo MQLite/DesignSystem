@@ -22,7 +22,7 @@ public record CanvasLayoutDto(
 public record TextConfigDto(string Title, string Subtitle, string Footer);
 
 public record CropStateDto(
-    string CropFrameId,
+    string SlotId,
     double OffsetX,
     double OffsetY,
     double Scale);
@@ -197,8 +197,8 @@ public sealed class ProjectsController : ControllerBase
         for (int i = 0; i < request.CropStates.Count; i++)
         {
             var entry = request.CropStates[i];
-            if (string.IsNullOrWhiteSpace(entry.CropFrameId))
-                return ValidationProblem($"cropStates[{i}].cropFrameId must be a non-empty string.");
+            if (string.IsNullOrWhiteSpace(entry.SlotId))
+                return ValidationProblem($"cropStates[{i}].slotId must be a non-empty string.");
             if (entry.OffsetX < -1.0 || entry.OffsetX > 1.0)
                 return ValidationProblem($"cropStates[{i}].offsetX must be in [-1.0, 1.0].");
             if (entry.OffsetY < -1.0 || entry.OffsetY > 1.0)

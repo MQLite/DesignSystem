@@ -15,6 +15,9 @@ public sealed record ComposeRequest
     /// <summary>Raw JSON from BackgroundLayout.SubjectSlotsJson.</summary>
     public required string SubjectSlotsJson { get; init; }
 
+    /// <summary>Raw JSON from BackgroundLayout.TextZonesJson. Null when no text zones defined.</summary>
+    public string? TextZonesJson { get; init; }
+
     /// <summary>Raw JSON text config (title, subtitle, footer). Use "{}" if empty.</summary>
     public required string TextConfigJson { get; init; }
 
@@ -30,12 +33,6 @@ public sealed record ComposeRequest
 
     /// <summary>Optional user-applied offset/scale adjustments (JSON). May be null.</summary>
     public string? UserAdjustmentsJson { get; init; }
-
-    /// <summary>
-    /// Raw JSON from BackgroundLayout.SubjectCropFramesJson.
-    /// Defines the crop window(s) for the subject image. Null when the template has no crop frame.
-    /// </summary>
-    public string? SubjectCropFramesJson { get; init; }
 
     /// <summary>
     /// Serialised SubjectCropState[] from the frontend — user's pan/zoom within each crop frame.

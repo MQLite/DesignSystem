@@ -35,10 +35,6 @@ public sealed class AppDbContext : DbContext
             .HasColumnType("nvarchar(max)");
 
         modelBuilder.Entity<BackgroundLayout>()
-            .Property(l => l.SubjectCropFramesJson)
-            .HasColumnType("nvarchar(max)");
-
-        modelBuilder.Entity<BackgroundLayout>()
             .Property(l => l.TextZonesJson)
             .HasColumnType("nvarchar(max)");
 

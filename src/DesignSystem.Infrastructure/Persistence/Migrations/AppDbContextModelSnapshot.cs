@@ -85,9 +85,6 @@ namespace DesignSystem.Infrastructure.Persistence.Migrations
                         .IsRequired()
                         .HasColumnType("nvarchar(max)");
 
-                    b.Property<string>("SubjectCropFramesJson")
-                        .HasColumnType("nvarchar(max)");
-
                     b.Property<string>("SubjectSlotsJson")
                         .IsRequired()
                         .HasColumnType("nvarchar(max)");

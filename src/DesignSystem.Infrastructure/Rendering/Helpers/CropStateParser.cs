@@ -27,13 +27,13 @@ public static class CropStateParser
                 return [];
 
             return raw
-                .Where(r => !string.IsNullOrWhiteSpace(r.CropFrameId))
+                .Where(r => !string.IsNullOrWhiteSpace(r.SlotId))
                 .Select(r => new CropStateEntry
                 {
-                    CropFrameId = r.CropFrameId!,
-                    OffsetX     = r.OffsetX,
-                    OffsetY     = r.OffsetY,
-                    Scale       = r.Scale ?? 1.0,
+                    SlotId  = r.SlotId!,
+                    OffsetX = r.OffsetX,
+                    OffsetY = r.OffsetY,
+                    Scale   = r.Scale ?? 1.0,
                 })
                 .ToList();
         }
@@ -44,16 +44,16 @@ public static class CropStateParser
     }
 
     /// <summary>
-    /// Convenience: look up the state for a specific crop frame id.
+    /// Look up the state for a specific slot id.
     /// Returns a default-centred, unscaled entry when not found.
     /// </summary>
-    public static CropStateEntry GetOrDefault(IReadOnlyList<CropStateEntry> entries, string cropFrameId)
-        => entries.FirstOrDefault(e => e.CropFrameId == cropFrameId)
-           ?? new CropStateEntry { CropFrameId = cropFrameId, OffsetX = 0, OffsetY = 0, Scale = 1.0 };
+    public static CropStateEntry GetOrDefault(IReadOnlyList<CropStateEntry> entries, string slotId)
+        => entries.FirstOrDefault(e => e.SlotId == slotId)
+           ?? new CropStateEntry { SlotId = slotId, OffsetX = 0, OffsetY = 0, Scale = 1.0 };
 
     private sealed class CropStateRaw
     {
-        public string? CropFrameId { get; set; }
+        public string? SlotId { get; set; }
 
         [JsonPropertyName("offsetX")]
         public double OffsetX { get; set; }

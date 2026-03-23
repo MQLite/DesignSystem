@@ -9,11 +9,6 @@ public static class AppDbContextSeeder
     private const string DefaultSubjectSlots =
         """[{"id":"main-subject","x":0.25,"y":0.15,"w":0.50,"h":0.60,"anchor":"BottomCenter","fitMode":"Contain","allowUserMove":true,"allowUserScale":true,"minScale":0.8,"maxScale":1.4}]""";
 
-    // Crop frame: slightly larger window for the user to pan/zoom within when cropping.
-    // aspectRatio = 0.60/0.70 ≈ 0.857 (portrait), matches placement slot proportions.
-    private const string DefaultSubjectCropFrames =
-        """[{"id":"main-crop","x":0.20,"y":0.10,"w":0.60,"h":0.70,"shape":"rect","aspectRatio":0.857,"allowUserMove":true,"allowUserScale":true}]""";
-
     // Safe-zone for text at the bottom
     private const string DefaultTextZones =
         """[{"id":"title","x":0.05,"y":0.02,"w":0.90,"h":0.10},{"id":"footer","x":0.05,"y":0.78,"w":0.90,"h":0.20}]""";
@@ -42,9 +37,8 @@ public static class AppDbContextSeeder
                         WidthMm  = 297,
                         HeightMm = 420,
                         Orientation = "Portrait",
-                        SubjectSlotsJson      = DefaultSubjectSlots,
-                        SubjectCropFramesJson = DefaultSubjectCropFrames,
-                        TextZonesJson         = DefaultTextZones,
+                        SubjectSlotsJson = DefaultSubjectSlots,
+                        TextZonesJson    = DefaultTextZones,
                     }
                 }
             },
@@ -65,9 +59,8 @@ public static class AppDbContextSeeder
                         WidthMm  = 297,
                         HeightMm = 420,
                         Orientation = "Portrait",
-                        SubjectSlotsJson      = DefaultSubjectSlots,
-                        SubjectCropFramesJson = DefaultSubjectCropFrames,
-                        TextZonesJson         = DefaultTextZones,
+                        SubjectSlotsJson = DefaultSubjectSlots,
+                        TextZonesJson    = DefaultTextZones,
                     }
                 }
             },
@@ -88,9 +81,8 @@ public static class AppDbContextSeeder
                         WidthMm  = 210,
                         HeightMm = 297,
                         Orientation = "Portrait",
-                        SubjectSlotsJson      = DefaultSubjectSlots,
-                        SubjectCropFramesJson = DefaultSubjectCropFrames,
-                        TextZonesJson         = DefaultTextZones,
+                        SubjectSlotsJson = DefaultSubjectSlots,
+                        TextZonesJson    = DefaultTextZones,
                     }
                 }
             },

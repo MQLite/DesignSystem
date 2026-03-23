@@ -1,15 +1,28 @@
+using System.Text;
+using System.Text.Json;
 using DesignSystem.Infrastructure.Rendering.Helpers;
 using DesignSystem.Infrastructure.Rendering.Models;
 using Microsoft.Extensions.Logging;
+using SixLabors.Fonts;
+using SixLabors.ImageSharp;
+using SixLabors.ImageSharp.Drawing.Processing;
+using SixLabors.ImageSharp.Formats.Png;
+using SixLabors.ImageSharp.PixelFormats;
+using SixLabors.ImageSharp.Processing;
 
 namespace DesignSystem.Infrastructure.Rendering;
 
 /// <summary>
-/// Skeleton implementation of <see cref="IComposerEngine"/>.
-/// Real image rendering is marked with TODO — replace with ImageSharp calls.
+/// Composer engine — produces rasterised PNG previews and SVG exports by:
+///   1. Loading the background and resizing to canvas DPI dimensions.
+///   2. Cover-fitting the subject photo into each slot with user crop pan/zoom applied.
+///   3. Rendering text zones (PNG: ImageSharp text; SVG: &lt;text&gt; elements).
 /// </summary>
 public sealed class ComposerEngine : IComposerEngine
 {
+    private static readonly JsonSerializerOptions _jsonOpts =
+        new() { PropertyNameCaseInsensitive = true };
+
     private readonly ILogger<ComposerEngine> _logger;
 
     public ComposerEngine(ILogger<ComposerEngine> logger) => _logger = logger;
@@ -19,7 +32,447 @@ public sealed class ComposerEngine : IComposerEngine
         ComposeRequest request,
         CancellationToken ct = default)
     {
-        // ── 1. Validate inputs ───────────────────────────────────────────────
+        ValidateRequest(request);
+
+        var slots      = SlotParser.Parse(request.SubjectSlotsJson);
+        var cropStates = CropStateParser.Parse(request.SubjectCropStateJson);
+
+        int cw = request.CanvasWidthPx;
+        int ch = request.CanvasHeightPx;
+
+        // ── 1. Load / create background canvas ───────────────────────────────
+        var absBg = ResolveStoragePath(request.StorageRootPath, request.BackgroundSourcePath);
+        using var canvas = await LoadOrCreateAsync(absBg, cw, ch, ct);
+
+        // ── 2. Composite subject ──────────────────────────────────────────────
+        if (request.SubjectCutoutPath is not null && slots.Count > 0)
+        {
+            var absSubject = ResolveStoragePath(request.StorageRootPath, request.SubjectCutoutPath);
+            _logger.LogInformation("Subject path resolved: {Path} (exists={Exists})", absSubject, File.Exists(absSubject));
+            if (File.Exists(absSubject))
+            {
+                var slot      = slots[0];
+                var cropState = CropStateParser.GetOrDefault(cropStates, slot.Id);
+                var (cropped, dstX, dstY) = await CropSubjectImageAsync(absSubject, slot, cropState, cw, ch, ct);
+                if (cropped is not null)
+                    using (cropped)
+                        canvas.Mutate(ctx => ctx.DrawImage(cropped, new Point(dstX, dstY), 1f));
+            }
+            else
+            {
+                _logger.LogWarning("Subject file not found: {Path}", absSubject);
+            }
+        }
+
+        // ── 3. Render text zones ──────────────────────────────────────────────
+        RenderTextZones(canvas, request.TextZonesJson, request.TextConfigJson, cw, ch);
+
+        // ── 4. Save PNG ───────────────────────────────────────────────────────
+        var previewDir    = Path.Combine(request.StorageRootPath, "previews");
+        Directory.CreateDirectory(previewDir);
+
+        var fileName      = $"{Guid.NewGuid():N}_preview.png";
+        var absOutputPath = Path.Combine(previewDir, fileName);
+        await canvas.SaveAsPngAsync(absOutputPath, new PngEncoder(), ct);
+
+        _logger.LogInformation("Preview written → {RelPath}", $"storage/previews/{fileName}");
+
+        return new ComposeResult(
+            OutputRelativePath: $"storage/previews/{fileName}",
+            WidthPx: cw,
+            HeightPx: ch,
+            OutputType: "preview-png");
+    }
+
+    /// <inheritdoc/>
+    public async Task<ComposeResult> ExportSvgAsync(
+        ComposeRequest request,
+        CancellationToken ct = default)
+    {
+        ValidateRequest(request);
+
+        var slots      = SlotParser.Parse(request.SubjectSlotsJson);
+        var cropStates = CropStateParser.Parse(request.SubjectCropStateJson);
+
+        int cw = request.CanvasWidthPx;
+        int ch = request.CanvasHeightPx;
+
+        var svg = new StringBuilder();
+        svg.AppendLine("""<?xml version="1.0" encoding="UTF-8"?>""");
+        svg.AppendLine($"""<svg xmlns="http://www.w3.org/2000/svg" width="{cw}" height="{ch}" viewBox="0 0 {cw} {ch}">""");
+
+        // ── 1. Background ─────────────────────────────────────────────────────
+        var absBg  = ResolveStoragePath(request.StorageRootPath, request.BackgroundSourcePath);
+        var bgUri  = await LoadResizeToDataUriAsync(absBg, cw, ch, ResizeMode.Stretch, ct);
+        svg.AppendLine($"""  <image x="0" y="0" width="{cw}" height="{ch}" preserveAspectRatio="none" href="{bgUri}"/>""");
+
+        // ── 2. Subject ────────────────────────────────────────────────────────
+        if (request.SubjectCutoutPath is not null && slots.Count > 0)
+        {
+            var absSubject = ResolveStoragePath(request.StorageRootPath, request.SubjectCutoutPath);
+            if (File.Exists(absSubject))
+            {
+                var slot      = slots[0];
+                var cropState = CropStateParser.GetOrDefault(cropStates, slot.Id);
+                var (cropped, dstX, dstY) = await CropSubjectImageAsync(absSubject, slot, cropState, cw, ch, ct);
+                if (cropped is not null)
+                {
+                    int drawW = cropped.Width;
+                    int drawH = cropped.Height;
+                    using (cropped)
+                    {
+                        var subUri = await ToDataUriAsync(cropped, ct);
+                        svg.AppendLine($"""  <image x="{dstX}" y="{dstY}" width="{drawW}" height="{drawH}" href="{subUri}"/>""");
+                    }
+                }
+            }
+            else
+            {
+                _logger.LogWarning("Subject file not found for SVG export: {Path}", absSubject);
+            }
+        }
+
+        // ── 3. Text zones ─────────────────────────────────────────────────────
+        AppendSvgTextZones(svg, request.TextZonesJson, request.TextConfigJson, cw, ch);
+
+        svg.AppendLine("</svg>");
+
+        // ── 4. Save SVG ───────────────────────────────────────────────────────
+        var exportDir     = Path.Combine(request.StorageRootPath, "exports");
+        Directory.CreateDirectory(exportDir);
+
+        var fileName      = $"{Guid.NewGuid():N}_export.svg";
+        var absOutputPath = Path.Combine(exportDir, fileName);
+        var relOutputPath = $"storage/exports/{fileName}";
+
+        await File.WriteAllTextAsync(absOutputPath, svg.ToString(), ct);
+        _logger.LogInformation("SVG export written → {RelPath}", relOutputPath);
+
+        return new ComposeResult(
+            OutputRelativePath: relOutputPath,
+            WidthPx: cw,
+            HeightPx: ch,
+            OutputType: "export-svg");
+    }
+
+    // ── Shared crop pipeline ──────────────────────────────────────────────────
+
+    /// <summary>
+    /// Loads the subject image and applies the crop-window model, returning the cropped
+    /// and resized image ready to composite. The <b>caller must dispose</b> the returned image.
+    /// Returns (null, 0, 0) when the crop region is degenerate.
+    /// </summary>
+    private async Task<(Image<Rgba32>? Cropped, int DstX, int DstY)> CropSubjectImageAsync(
+        string absSubjectPath,
+        SubjectSlot slot,
+        CropStateEntry cropState,
+        int cw, int ch,
+        CancellationToken ct)
+    {
+        var subject = await Image.LoadAsync<Rgba32>(absSubjectPath, ct);
+        try
+        {
+            var (cropX, cropY, cropW, cropH) = LayoutCalculator.ToPixels(slot.Rect, cw, ch);
+            cropW = Math.Max(1, cropW);
+            cropH = Math.Max(1, cropH);
+
+            int srcW = subject.Width;
+            int srcH = subject.Height;
+
+            // ── Derive crop window in source-image space ──────────────────────
+            //
+            // coverScale = scale that makes the source just cover the slot.
+            // finalScale = coverScale × user-scale.
+            // imgLeft/Top = top-left of the scaled source within the slot viewport.
+            // Projecting the slot back into source space gives the crop window.
+            //
+            double coverScale = Math.Max((double)cropW / srcW, (double)cropH / srcH);
+            double finalScale = coverScale * Math.Max(0.01, cropState.Scale);
+
+            double panX = cropState.OffsetX * cropW;
+            double panY = cropState.OffsetY * cropH;
+
+            double imgLeft = (cropW - srcW * finalScale) / 2.0 + panX;
+            double imgTop  = (cropH - srcH * finalScale) / 2.0 + panY;
+
+            double wX = -imgLeft / finalScale;
+            double wY = -imgTop  / finalScale;
+            double wW =  cropW   / finalScale;
+            double wH =  cropH   / finalScale;
+
+            // ── Clamp crop window to source bounds ────────────────────────────
+            double cX = Math.Max(0.0, wX);
+            double cY = Math.Max(0.0, wY);
+            double cW = Math.Min(wW - (cX - wX), srcW - cX);
+            double cH = Math.Min(wH - (cY - wY), srcH - cY);
+
+            if (cW < 1 || cH < 1) { subject.Dispose(); return (null, 0, 0); }
+
+            int iCX = (int)Math.Round(cX);
+            int iCY = (int)Math.Round(cY);
+            int iCW = Math.Max(1, (int)Math.Round(cW));
+            int iCH = Math.Max(1, (int)Math.Round(cH));
+            iCW = Math.Min(iCW, srcW - iCX);
+            iCH = Math.Min(iCH, srcH - iCY);
+            if (iCW < 1 || iCH < 1) { subject.Dispose(); return (null, 0, 0); }
+
+            subject.Mutate(ctx => ctx.Crop(new Rectangle(iCX, iCY, iCW, iCH)));
+
+            // ── Scale cropped region to fill slot ─────────────────────────────
+            //
+            // Fully contained → aspect ratios match → Stretch fills slot exactly.
+            // Clamped (scale < 1 or excessive pan) → letterbox to avoid distortion.
+            //
+            bool fullyContained = cX <= wX + 0.5 && cY <= wY + 0.5 &&
+                                  cX + cW >= wX + wW - 0.5 &&
+                                  cY + cH >= wY + wH - 0.5;
+
+            subject.Mutate(ctx => ctx.Resize(new ResizeOptions
+            {
+                Size = new Size(cropW, cropH),
+                Mode = fullyContained ? ResizeMode.Stretch : ResizeMode.Max,
+            }));
+
+            int dstX = cropX + (cropW - subject.Width)  / 2;
+            int dstY = cropY + (cropH - subject.Height) / 2;
+
+            _logger.LogInformation(
+                "Subject cropped — slot({CX},{CY},{CW},{CH}) src({SW}×{SH}) " +
+                "scale={Scale:F2} cropWin=({WX:F1},{WY:F1},{WW:F1}×{WH:F1}) " +
+                "clamped=({IX},{IY},{IW}×{IH}) dst=({DX},{DY}) mode={Mode}",
+                cropX, cropY, cropW, cropH, srcW, srcH,
+                cropState.Scale, wX, wY, wW, wH,
+                iCX, iCY, iCW, iCH, dstX, dstY,
+                fullyContained ? "Stretch" : "Letterbox");
+
+            return (subject, dstX, dstY);
+        }
+        catch
+        {
+            subject.Dispose();
+            throw;
+        }
+    }
+
+    // ── PNG helpers ───────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Loads the background image and resizes (stretch) it to the canvas pixel dimensions.
+    /// Falls back to a solid grey canvas when the file is missing.
+    /// </summary>
+    private async Task<Image<Rgba32>> LoadOrCreateAsync(
+        string absPath, int cw, int ch, CancellationToken ct)
+    {
+        if (!File.Exists(absPath))
+        {
+            _logger.LogWarning("Background not found: {Path} — using grey fallback.", absPath);
+            return new Image<Rgba32>(cw, ch, new Rgba32(220, 220, 220));
+        }
+
+        var img = await Image.LoadAsync<Rgba32>(absPath, ct);
+        img.Mutate(ctx => ctx.Resize(new ResizeOptions
+        {
+            Size = new Size(cw, ch),
+            Mode = ResizeMode.Stretch,
+        }));
+        return img;
+    }
+
+    /// <summary>
+    /// Renders title / subtitle / footer text at the zones defined in TextZonesJson.
+    /// Silently skips rendering when fonts or zone data are unavailable.
+    /// </summary>
+    private void RenderTextZones(
+        Image<Rgba32> canvas,
+        string? textZonesJson,
+        string? textConfigJson,
+        int cw, int ch)
+    {
+        if (string.IsNullOrWhiteSpace(textZonesJson) ||
+            string.IsNullOrWhiteSpace(textConfigJson))
+            return;
+
+        var textValues = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            using var doc = JsonDocument.Parse(textConfigJson);
+            foreach (var prop in doc.RootElement.EnumerateObject())
+                textValues[prop.Name] = prop.Value.GetString() ?? "";
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to parse TextConfigJson — skipping text rendering.");
+            return;
+        }
+
+        TextZoneDto[]? zones;
+        try
+        {
+            zones = JsonSerializer.Deserialize<TextZoneDto[]>(textZonesJson, _jsonOpts);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to parse TextZonesJson — skipping text rendering.");
+            return;
+        }
+        if (zones is null || zones.Length == 0) return;
+
+        FontFamily? fontFamily = null;
+        foreach (var name in new[] { "Arial", "Helvetica", "DejaVu Sans", "Liberation Sans", "Segoe UI", "Tahoma" })
+        {
+            if (SystemFonts.TryGet(name, out var ff)) { fontFamily = ff; break; }
+        }
+        if (fontFamily is null)
+        {
+            _logger.LogWarning("No suitable system font found — skipping text rendering.");
+            return;
+        }
+
+        canvas.Mutate(ctx =>
+        {
+            foreach (var zone in zones)
+            {
+                textValues.TryGetValue(zone.Id, out var text);
+                text ??= "";
+                if (string.IsNullOrWhiteSpace(text)) continue;
+
+                int zx = (int)Math.Round(zone.X * cw);
+                int zy = (int)Math.Round(zone.Y * ch);
+                int zw = Math.Max(1, (int)Math.Round(zone.W * cw));
+                int zh = Math.Max(1, (int)Math.Round(zone.H * ch));
+
+                float fontSize = Math.Max(8f, zh * 0.60f);
+                var font = fontFamily.Value.CreateFont(fontSize,
+                    zone.Id == "title" ? FontStyle.Bold : FontStyle.Regular);
+
+                var center = new PointF(zx + zw / 2f, zy + zh / 2f);
+
+                ctx.DrawText(
+                    new RichTextOptions(font)
+                    {
+                        Origin              = new PointF(center.X + 2, center.Y + 2),
+                        HorizontalAlignment = HorizontalAlignment.Center,
+                        VerticalAlignment   = VerticalAlignment.Center,
+                        WrappingLength      = zw,
+                    },
+                    text,
+                    Color.FromRgba(0, 0, 0, 180));
+
+                ctx.DrawText(
+                    new RichTextOptions(font)
+                    {
+                        Origin              = center,
+                        HorizontalAlignment = HorizontalAlignment.Center,
+                        VerticalAlignment   = VerticalAlignment.Center,
+                        WrappingLength      = zw,
+                    },
+                    text,
+                    Color.White);
+            }
+        });
+    }
+
+    // ── SVG helpers ───────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Loads an image file, resizes it, and returns a PNG data URI (base64).
+    /// Falls back to a grey rectangle when the file is missing.
+    /// </summary>
+    private static async Task<string> LoadResizeToDataUriAsync(
+        string absPath, int targetW, int targetH, ResizeMode mode, CancellationToken ct)
+    {
+        Image<Rgba32> img;
+        if (File.Exists(absPath))
+        {
+            img = await Image.LoadAsync<Rgba32>(absPath, ct);
+            img.Mutate(ctx => ctx.Resize(new ResizeOptions
+            {
+                Size = new Size(targetW, targetH),
+                Mode = mode,
+            }));
+        }
+        else
+        {
+            img = new Image<Rgba32>(targetW, targetH, new Rgba32(220, 220, 220));
+        }
+
+        using (img)
+            return await ToDataUriAsync(img, ct);
+    }
+
+    /// <summary>Encodes an ImageSharp image as a PNG data URI (base64).</summary>
+    private static async Task<string> ToDataUriAsync(Image<Rgba32> img, CancellationToken ct)
+    {
+        using var ms = new MemoryStream();
+        await img.SaveAsPngAsync(ms, new PngEncoder(), ct);
+        return $"data:image/png;base64,{Convert.ToBase64String(ms.ToArray())}";
+    }
+
+    /// <summary>
+    /// Appends SVG &lt;text&gt; elements for each defined text zone.
+    /// Each zone gets a semi-transparent drop-shadow and a white foreground text element.
+    /// </summary>
+    private static void AppendSvgTextZones(
+        StringBuilder svg,
+        string? textZonesJson,
+        string? textConfigJson,
+        int cw, int ch)
+    {
+        if (string.IsNullOrWhiteSpace(textZonesJson) || string.IsNullOrWhiteSpace(textConfigJson))
+            return;
+
+        var textValues = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            using var doc = JsonDocument.Parse(textConfigJson);
+            foreach (var prop in doc.RootElement.EnumerateObject())
+                textValues[prop.Name] = prop.Value.GetString() ?? "";
+        }
+        catch { return; }
+
+        TextZoneDto[]? zones;
+        try
+        {
+            zones = JsonSerializer.Deserialize<TextZoneDto[]>(textZonesJson, _jsonOpts);
+        }
+        catch { return; }
+        if (zones is null || zones.Length == 0) return;
+
+        foreach (var zone in zones)
+        {
+            textValues.TryGetValue(zone.Id, out var text);
+            if (string.IsNullOrWhiteSpace(text)) continue;
+
+            int zx = (int)Math.Round(zone.X * cw);
+            int zy = (int)Math.Round(zone.Y * ch);
+            int zw = Math.Max(1, (int)Math.Round(zone.W * cw));
+            int zh = Math.Max(1, (int)Math.Round(zone.H * ch));
+
+            float fontSize  = Math.Max(8f, zh * 0.60f);
+            string weight   = zone.Id == "title" ? "bold" : "normal";
+            string fontAttr = $"font-family=\"Arial, Helvetica, sans-serif\" font-size=\"{fontSize:F0}\" font-weight=\"{weight}\" text-anchor=\"middle\" dominant-baseline=\"middle\"";
+
+            int cx = zx + zw / 2;
+            int cy = zy + zh / 2;
+
+            // XML-escape text content
+            var escaped = text
+                .Replace("&", "&amp;")
+                .Replace("<", "&lt;")
+                .Replace(">", "&gt;")
+                .Replace("\"", "&quot;");
+
+            // Drop shadow
+            svg.AppendLine($"""  <text x="{cx + 2}" y="{cy + 2}" {fontAttr} fill="#000000" fill-opacity="0.7">{escaped}</text>""");
+            // Foreground
+            svg.AppendLine($"""  <text x="{cx}" y="{cy}" {fontAttr} fill="#ffffff">{escaped}</text>""");
+        }
+    }
+
+    // ── Shared helpers ────────────────────────────────────────────────────────
+
+    private static void ValidateRequest(ComposeRequest request)
+    {
         if (string.IsNullOrWhiteSpace(request.BackgroundSourcePath))
             throw new ArgumentException("BackgroundSourcePath is required.", nameof(request));
 
@@ -30,171 +483,27 @@ public sealed class ComposerEngine : IComposerEngine
 
         if (string.IsNullOrWhiteSpace(request.StorageRootPath))
             throw new ArgumentException("StorageRootPath is required.", nameof(request));
-
-        // ── 2. Parse subject slots, crop frames and crop state ───────────────
-        var slots      = SlotParser.Parse(request.SubjectSlotsJson);
-        var cropFrames = CropFrameParser.Parse(request.SubjectCropFramesJson);
-        var cropStates = CropStateParser.Parse(request.SubjectCropStateJson);
-        _logger.LogDebug(
-            "Parsed {SlotCount} slot(s), {CropCount} crop frame(s) from layout.",
-            slots.Count, cropFrames.Count);
-
-        // ── 3. Compute subject placement and crop ────────────────────────────
-        if (slots.Count > 0 && request.SubjectCutoutPath is not null)
-        {
-            // TODO (ImageSharp — Step A): load actual subject image dimensions:
-            //   var absSubject = Path.Combine(request.StorageRootPath, "..", request.SubjectCutoutPath);
-            //   using var subjectImg = await Image.LoadAsync<Rgba32>(absSubject, ct);
-            //   int srcW = subjectImg.Width;
-            //   int srcH = subjectImg.Height;
-
-            // Skeleton: use placeholder dimensions until real image loading is implemented
-            const int placeholderW = 800;
-            const int placeholderH = 1200;
-
-            // TODO (ImageSharp — Step B): apply crop frame + user crop state BEFORE placement.
-            //   When a matching crop frame exists for slot[0]:
-            //
-            //   var primaryFrame = cropFrames.FirstOrDefault(f => f.Id == "main-crop");
-            //   if (primaryFrame is not null)
-            //   {
-            //       var cropState = CropStateParser.GetOrDefault(cropStates, primaryFrame.Id);
-            //
-            //       // Crop viewport in canvas pixels
-            //       int cropX = (int)(primaryFrame.Rect.X * request.CanvasWidthPx);
-            //       int cropY = (int)(primaryFrame.Rect.Y * request.CanvasHeightPx);
-            //       int cropW = (int)(primaryFrame.Rect.W * request.CanvasWidthPx);
-            //       int cropH = (int)(primaryFrame.Rect.H * request.CanvasHeightPx);
-            //
-            //       // Cover-fit: scale the subject so it fills the crop viewport
-            //       double coverScale = Math.Max((double)cropW / srcW, (double)cropH / srcH);
-            //       double finalScale = coverScale * cropState.Scale;
-            //
-            //       // Pan offset in source pixels
-            //       int panX = (int)(cropState.OffsetX * cropW / finalScale);
-            //       int panY = (int)(cropState.OffsetY * cropH / finalScale);
-            //
-            //       // Crop source rect centred on pan offset
-            //       int srcCropX = (int)(srcW / 2.0 - cropW / finalScale / 2.0) + panX;
-            //       int srcCropY = (int)(srcH / 2.0 - cropH / finalScale / 2.0) + panY;
-            //       int srcCropW = (int)(cropW / finalScale);
-            //       int srcCropH = (int)(cropH / finalScale);
-            //
-            //       // Apply: subjectImg.Mutate(ctx => ctx
-            //       //     .Crop(new Rectangle(srcCropX, srcCropY, srcCropW, srcCropH))
-            //       //     .Resize(cropW, cropH));
-            //
-            //       // After crop the effective dimensions are (cropW, cropH)
-            //       // srcW = cropW; srcH = cropH;
-            //   }
-
-            var placement = LayoutCalculator.CalculatePlacement(
-                placeholderW, placeholderH,
-                slots[0],
-                request.CanvasWidthPx, request.CanvasHeightPx);
-
-            _logger.LogDebug(
-                "Computed slot[0] placement — X:{X} Y:{Y} W:{W} H:{H}",
-                placement.X, placement.Y, placement.W, placement.H);
-        }
-
-        // ── 4. Ensure output directory exists ────────────────────────────────
-        var previewDir = Path.Combine(request.StorageRootPath, "previews");
-        Directory.CreateDirectory(previewDir);
-
-        // ── 5. Build output path ─────────────────────────────────────────────
-        var fileName = $"{Guid.NewGuid():N}_preview.png";
-        var absOutputPath = Path.Combine(previewDir, fileName);
-        var relOutputPath = $"storage/previews/{fileName}";
-
-        // ── 6. Skeleton placeholder ──────────────────────────────────────────
-        // TODO (ImageSharp full implementation):
-        //   Step A — Load background:
-        //     var absBg = Path.Combine(request.StorageRootPath, "..", request.BackgroundSourcePath);
-        //     using var canvas = await Image.LoadAsync<Rgba32>(absBg, ct);
-        //     canvas.Mutate(ctx => ctx.Resize(request.CanvasWidthPx, request.CanvasHeightPx));
-        //
-        //   Step B — Composite subject (if present):
-        //     var absSubject = ...;
-        //     using var subjectImg = await Image.LoadAsync<Rgba32>(absSubject, ct);
-        //     subjectImg.Mutate(ctx => ctx.Resize(placement.W, placement.H));
-        //     canvas.Mutate(ctx => ctx.DrawImage(subjectImg, new Point(placement.X, placement.Y), opacity: 1f));
-        //
-        //   Step C — Render text zones:
-        //     Parse TextConfigJson, load font, call canvas.Mutate(ctx => ctx.DrawText(...));
-        //
-        //   Step D — Save:
-        //     await canvas.SaveAsPngAsync(absOutputPath, ct);
-
-        await File.WriteAllTextAsync(
-            absOutputPath,
-            $"[ComposerEngine SKELETON]\n" +
-            $"bg={request.BackgroundSourcePath}\n" +
-            $"subject={request.SubjectCutoutPath ?? "(none)"}\n" +
-            $"dpi={request.TargetDpi}  canvas={request.CanvasWidthPx}x{request.CanvasHeightPx}\n" +
-            $"generated={DateTimeOffset.UtcNow:O}",
-            ct);
-
-        _logger.LogInformation(
-            "Skeleton preview placeholder written → {RelPath}", relOutputPath);
-
-        return new ComposeResult(
-            OutputRelativePath: relOutputPath,
-            WidthPx: request.CanvasWidthPx,
-            HeightPx: request.CanvasHeightPx,
-            OutputType: "preview-png");
     }
 
-    /// <inheritdoc/>
-    public async Task<ComposeResult> ExportSvgAsync(
-        ComposeRequest request,
-        CancellationToken ct = default)
+    /// <summary>
+    /// Resolves a relative storage path (e.g. "storage/uploads/file.jpg") against the
+    /// absolute StorageRootPath by stripping the leading "storage/" prefix.
+    /// </summary>
+    private static string ResolveStoragePath(string storageRoot, string relativePath)
     {
-        if (string.IsNullOrWhiteSpace(request.BackgroundSourcePath))
-            throw new ArgumentException("BackgroundSourcePath is required.", nameof(request));
-
-        if (request.CanvasWidthPx <= 0 || request.CanvasHeightPx <= 0)
-            throw new ArgumentException(
-                $"Canvas dimensions must be positive (got {request.CanvasWidthPx}×{request.CanvasHeightPx}).",
-                nameof(request));
-
-        var exportDir = Path.Combine(request.StorageRootPath, "exports");
-        Directory.CreateDirectory(exportDir);
-
-        var fileName = $"{Guid.NewGuid():N}_export.svg";
-        var absOutputPath = Path.Combine(exportDir, fileName);
-        var relOutputPath = $"storage/exports/{fileName}";
-
-        // TODO (full implementation): compose all layers into a proper SVG document
-        //   - Parse crop frames + state: CropFrameParser.Parse(request.SubjectCropFramesJson)
-        //     and CropStateParser.Parse(request.SubjectCropStateJson)
-        //   - Apply crop (see ComposePreviewAsync Step B TODO) before embedding subject image
-        //   - Embed background + subject images as base64 <image> elements
-        //   - Apply UserAdjustmentsJson (CanvasLayout) per-layer transforms
-        //   - Render text zones with font paths
-        var placeholderSvg =
-            $"""
-            <?xml version="1.0" encoding="UTF-8"?>
-            <!-- ComposerEngine SKELETON -->
-            <svg xmlns="http://www.w3.org/2000/svg"
-                 xmlns:xlink="http://www.w3.org/1999/xlink"
-                 width="{request.CanvasWidthPx}" height="{request.CanvasHeightPx}"
-                 viewBox="0 0 {request.CanvasWidthPx} {request.CanvasHeightPx}">
-              <!-- bg={request.BackgroundSourcePath} subject={request.SubjectCutoutPath ?? "(none)"} -->
-              <rect width="{request.CanvasWidthPx}" height="{request.CanvasHeightPx}" fill="#e5e7eb"/>
-              <text x="50%" y="50%" text-anchor="middle" dominant-baseline="middle"
-                    font-family="sans-serif" font-size="48" fill="#9ca3af">SVG Export Skeleton</text>
-            </svg>
-            """;
-
-        await File.WriteAllTextAsync(absOutputPath, placeholderSvg, ct);
-
-        _logger.LogInformation("Skeleton SVG export written → {RelPath}", relOutputPath);
-
-        return new ComposeResult(
-            OutputRelativePath: relOutputPath,
-            WidthPx: request.CanvasWidthPx,
-            HeightPx: request.CanvasHeightPx,
-            OutputType: "export-svg");
+        const string prefix = "storage/";
+        var suffix = relativePath.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
+            ? relativePath[prefix.Length..]
+            : relativePath;
+        return Path.GetFullPath(Path.Combine(storageRoot, suffix));
     }
+
+    // ── DTOs used only within this file ──────────────────────────────────────
+
+    private sealed record TextZoneDto(
+        string Id,
+        double X,
+        double Y,
+        double W,
+        double H);
 }
