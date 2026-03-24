@@ -38,6 +38,10 @@ public sealed class AppDbContext : DbContext
             .Property(l => l.TextZonesJson)
             .HasColumnType("nvarchar(max)");
 
+        modelBuilder.Entity<BackgroundLayout>()
+            .Property(l => l.BgCropJson)
+            .HasColumnType("nvarchar(max)");
+
         modelBuilder.Entity<DesignProject>()
             .Property(p => p.TextConfigJson)
             .HasColumnType("nvarchar(max)");

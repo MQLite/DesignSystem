@@ -16,6 +16,7 @@ public record AdminLayoutDetail(
     string Orientation,
     string SubjectSlotsJson,
     string? TextZonesJson,
+    string? BgCropJson,
     int Version);
 
 public record AdminBackgroundDetail(
@@ -37,7 +38,8 @@ public record CreateAdminLayoutRequest(
     int HeightMm,
     string Orientation,
     string SubjectSlotsJson,
-    string? TextZonesJson);
+    string? TextZonesJson,
+    string? BgCropJson);
 
 public record UpdateAdminLayoutRequest(
     string SizeCode,
@@ -45,7 +47,8 @@ public record UpdateAdminLayoutRequest(
     int HeightMm,
     string Orientation,
     string SubjectSlotsJson,
-    string? TextZonesJson);
+    string? TextZonesJson,
+    string? BgCropJson);
 
 // ── Controller ─────────────────────────────────────────────────────────────────
 
@@ -218,6 +221,7 @@ public sealed class AdminBackgroundsController : ControllerBase
             Orientation           = request.Orientation,
             SubjectSlotsJson = request.SubjectSlotsJson,
             TextZonesJson    = request.TextZonesJson,
+            BgCropJson       = request.BgCropJson,
         };
 
         _db.BackgroundLayouts.Add(layout);
@@ -240,12 +244,13 @@ public sealed class AdminBackgroundsController : ControllerBase
 
         if (layout is null) return NotFound($"Layout {layoutId} not found.");
 
-        layout.SizeCode              = request.SizeCode;
-        layout.WidthMm               = request.WidthMm;
-        layout.HeightMm              = request.HeightMm;
-        layout.Orientation           = request.Orientation;
+        layout.SizeCode         = request.SizeCode;
+        layout.WidthMm          = request.WidthMm;
+        layout.HeightMm         = request.HeightMm;
+        layout.Orientation      = request.Orientation;
         layout.SubjectSlotsJson = request.SubjectSlotsJson;
         layout.TextZonesJson    = request.TextZonesJson;
+        layout.BgCropJson       = request.BgCropJson;
         layout.Version++;
 
         await _db.SaveChangesAsync(ct);
@@ -290,5 +295,6 @@ public sealed class AdminBackgroundsController : ControllerBase
         l.Orientation,
         l.SubjectSlotsJson,
         l.TextZonesJson,
+        l.BgCropJson,
         l.Version);
 }

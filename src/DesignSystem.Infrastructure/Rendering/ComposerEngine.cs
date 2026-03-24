@@ -42,7 +42,7 @@ public sealed class ComposerEngine : IComposerEngine
 
         // ── 1. Load / create background canvas ───────────────────────────────
         var absBg = ResolveStoragePath(request.StorageRootPath, request.BackgroundSourcePath);
-        using var canvas = await LoadOrCreateAsync(absBg, cw, ch, ct);
+        using var canvas = await LoadBackgroundWithCropAsync(absBg, cw, ch, BgCropEntry.Parse(request.BgCropJson), ct);
 
         // ── 2. Composite subject ──────────────────────────────────────────────
         if (request.SubjectCutoutPath is not null && slots.Count > 0)
@@ -103,7 +103,8 @@ public sealed class ComposerEngine : IComposerEngine
 
         // ── 1. Background ─────────────────────────────────────────────────────
         var absBg  = ResolveStoragePath(request.StorageRootPath, request.BackgroundSourcePath);
-        var bgUri  = await LoadResizeToDataUriAsync(absBg, cw, ch, ResizeMode.Stretch, ct);
+        using var bgCanvas = await LoadBackgroundWithCropAsync(absBg, cw, ch, BgCropEntry.Parse(request.BgCropJson), ct);
+        var bgUri  = await ToDataUriAsync(bgCanvas, ct);
         svg.AppendLine($"""  <image x="0" y="0" width="{cw}" height="{ch}" preserveAspectRatio="none" href="{bgUri}"/>""");
 
         // ── 2. Subject ────────────────────────────────────────────────────────
@@ -266,11 +267,12 @@ public sealed class ComposerEngine : IComposerEngine
     // ── PNG helpers ───────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Loads the background image and resizes (stretch) it to the canvas pixel dimensions.
+    /// Loads the background image, applies the admin-defined bgCrop transform
+    /// (cover-scale × user scale + offset), and returns a canvas-sized image.
     /// Falls back to a solid grey canvas when the file is missing.
     /// </summary>
-    private async Task<Image<Rgba32>> LoadOrCreateAsync(
-        string absPath, int cw, int ch, CancellationToken ct)
+    private async Task<Image<Rgba32>> LoadBackgroundWithCropAsync(
+        string absPath, int cw, int ch, BgCropEntry crop, CancellationToken ct)
     {
         if (!File.Exists(absPath))
         {
@@ -278,13 +280,42 @@ public sealed class ComposerEngine : IComposerEngine
             return new Image<Rgba32>(cw, ch, new Rgba32(220, 220, 220));
         }
 
-        var img = await Image.LoadAsync<Rgba32>(absPath, ct);
-        img.Mutate(ctx => ctx.Resize(new ResizeOptions
+        var src = await Image.LoadAsync<Rgba32>(absPath, ct);
+        try
         {
-            Size = new Size(cw, ch),
-            Mode = ResizeMode.Stretch,
-        }));
-        return img;
+            // Cover scale: image just fills the canvas; multiply by user scale
+            double coverScale = Math.Max((double)cw / src.Width, (double)ch / src.Height);
+            double finalScale = coverScale * Math.Max(0.01, crop.Scale);
+
+            int scaledW = Math.Max(1, (int)Math.Round(src.Width  * finalScale));
+            int scaledH = Math.Max(1, (int)Math.Round(src.Height * finalScale));
+
+            src.Mutate(ctx => ctx.Resize(scaledW, scaledH));
+
+            // Image top-left on canvas (centred + user offset)
+            int imgX = (int)Math.Round((cw - scaledW) / 2.0 + crop.OffsetX * cw);
+            int imgY = (int)Math.Round((ch - scaledH) / 2.0 + crop.OffsetY * ch);
+
+            // Visible crop window within the scaled image
+            int srcX = Math.Max(0, -imgX);
+            int srcY = Math.Max(0, -imgY);
+            int dstX = Math.Max(0,  imgX);
+            int dstY = Math.Max(0,  imgY);
+            int visW = Math.Min(scaledW - srcX, cw - dstX);
+            int visH = Math.Min(scaledH - srcY, ch - dstY);
+
+            var canvas = new Image<Rgba32>(cw, ch, new Rgba32(220, 220, 220));
+            if (visW > 0 && visH > 0)
+            {
+                using var cropped = src.Clone(ctx => ctx.Crop(new Rectangle(srcX, srcY, visW, visH)));
+                canvas.Mutate(ctx => ctx.DrawImage(cropped, new Point(dstX, dstY), 1f));
+            }
+            return canvas;
+        }
+        finally
+        {
+            src.Dispose();
+        }
     }
 
     /// <summary>
@@ -604,4 +635,28 @@ public sealed class ComposerEngine : IComposerEngine
         double Y,
         double W,
         double H);
+
+    /// <summary>
+    /// Background crop transform parsed from BgCropJson.
+    /// Scale=1 = cover-fit; offset fractions of canvas size (0 = centred).
+    /// </summary>
+    private sealed record BgCropEntry(double Scale, double OffsetX, double OffsetY)
+    {
+        public static BgCropEntry Default => new(1.0, 0.0, 0.0);
+
+        public static BgCropEntry Parse(string? json)
+        {
+            if (string.IsNullOrWhiteSpace(json)) return Default;
+            try
+            {
+                using var doc = JsonDocument.Parse(json);
+                var root = doc.RootElement;
+                return new BgCropEntry(
+                    root.TryGetProperty("scale",   out var s) ? s.GetDouble() : 1.0,
+                    root.TryGetProperty("offsetX", out var x) ? x.GetDouble() : 0.0,
+                    root.TryGetProperty("offsetY", out var y) ? y.GetDouble() : 0.0);
+            }
+            catch { return Default; }
+        }
+    }
 }

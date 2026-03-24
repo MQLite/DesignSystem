@@ -41,6 +41,12 @@ public sealed record ComposeRequest
     public string? SubjectCropStateJson { get; init; }
 
     /// <summary>
+    /// Admin-defined background crop: { "scale": 1.0, "offsetX": 0.0, "offsetY": 0.0 }.
+    /// Null means default cover-fit (scale=1, centred).
+    /// </summary>
+    public string? BgCropJson { get; init; }
+
+    /// <summary>
     /// Absolute path to the storage root (ContentRootPath + "storage").
     /// Provided by the caller (API layer) so the engine stays host-independent.
     /// </summary>

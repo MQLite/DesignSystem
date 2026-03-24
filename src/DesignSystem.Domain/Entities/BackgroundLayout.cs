@@ -40,6 +40,13 @@ public sealed class BackgroundLayout
     /// </summary>
     public string? TextZonesJson { get; set; }
 
+    /// <summary>
+    /// Admin-defined background crop transform:
+    /// { "scale": 1.0, "offsetX": 0.0, "offsetY": 0.0 }
+    /// scale=1 = cover-fit, offset is fraction of canvas size (0 = centred).
+    /// </summary>
+    public string? BgCropJson { get; set; }
+
     public int Version { get; set; } = 1;
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
 }

@@ -15,6 +15,7 @@ public record LayoutSummary(
     string Orientation,
     string SubjectSlotsJson,
     string? TextZonesJson,
+    string? BgCropJson,
     int Version);
 
 public record BackgroundSummary(
@@ -58,6 +59,7 @@ public sealed class BackgroundsController : ControllerBase
                 l.Orientation,
                 l.SubjectSlotsJson,
                 l.TextZonesJson,
+                l.BgCropJson,
                 l.Version)).ToList())).ToList();
 
         return Ok(items);
