@@ -47,6 +47,13 @@ public sealed record ComposeRequest
     public string? BgCropJson { get; init; }
 
     /// <summary>
+    /// Per-zone typography overrides from Step 6.
+    /// JSON: { "zoneId": { "fontSize": 60, "color": "#ff0000", ... } }.
+    /// Merged with zone defaults at render time. Null means use template defaults only.
+    /// </summary>
+    public string? TextStyleOverridesJson { get; init; }
+
+    /// <summary>
     /// Absolute path to the storage root (ContentRootPath + "storage").
     /// Provided by the caller (API layer) so the engine stays host-independent.
     /// </summary>

@@ -42,7 +42,8 @@ public sealed class ComposerEngine : IComposerEngine
 
         // ── 1. Load / create background canvas ───────────────────────────────
         var absBg = ResolveStoragePath(request.StorageRootPath, request.BackgroundSourcePath);
-        using var canvas = await LoadBackgroundWithCropAsync(absBg, cw, ch, BgCropEntry.Parse(request.BgCropJson), ct);
+        var bgResult = await LoadBackgroundWithCropAsync(absBg, cw, ch, BgCropEntry.Parse(request.BgCropJson), ct, logDetails: true);
+        using var canvas = bgResult.Canvas;
 
         // ── 2. Composite subject ──────────────────────────────────────────────
         if (request.SubjectCutoutPath is not null && slots.Count > 0)
@@ -53,7 +54,7 @@ public sealed class ComposerEngine : IComposerEngine
             {
                 var slot      = slots[0];
                 var cropState = CropStateParser.GetOrDefault(cropStates, slot.Id);
-                var (cropped, dstX, dstY) = await CropSubjectImageAsync(absSubject, slot, cropState, cw, ch, ct);
+                var (cropped, dstX, dstY) = await CropSubjectImageAsync(absSubject, slot, cropState, cw, ch, ct, logDetails: true);
                 if (cropped is not null)
                     using (cropped)
                         canvas.Mutate(ctx => ctx.DrawImage(cropped, new Point(dstX, dstY), 1f));
@@ -65,7 +66,7 @@ public sealed class ComposerEngine : IComposerEngine
         }
 
         // ── 3. Render text zones ──────────────────────────────────────────────
-        RenderTextZones(canvas, request.TextZonesJson, request.TextConfigJson, cw, ch);
+        RenderTextZones(canvas, request.TextZonesJson, request.TextConfigJson, request.TextStyleOverridesJson, cw, ch);
 
         // ── 4. Save PNG ───────────────────────────────────────────────────────
         var previewDir    = Path.Combine(request.StorageRootPath, "previews");
@@ -97,15 +98,33 @@ public sealed class ComposerEngine : IComposerEngine
         int cw = request.CanvasWidthPx;
         int ch = request.CanvasHeightPx;
 
+        // Use a placeholder so we can back-fill the tight viewBox after measuring content.
+        const string vbPlaceholder = "%%VIEWBOX%%";
         var svg = new StringBuilder();
-        svg.AppendLine("""<?xml version="1.0" encoding="UTF-8"?>""");
-        svg.AppendLine($"""<svg xmlns="http://www.w3.org/2000/svg" width="{cw}" height="{ch}" viewBox="0 0 {cw} {ch}">""");
+        svg.AppendLine("""<?xml version="1.0" encoding="UTF-8" standalone="no"?>""");
+        svg.AppendLine($"""<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" version="1.1" viewBox="{vbPlaceholder}">""");
+
+        // Track content bounding box across all layers.
+        int minX = cw, minY = ch, maxX = 0, maxY = 0;
+        void Expand(int x, int y, int w, int h)
+        {
+            if (w <= 0 || h <= 0) return;
+            minX = Math.Min(minX, x);
+            minY = Math.Min(minY, y);
+            maxX = Math.Max(maxX, x + w);
+            maxY = Math.Max(maxY, y + h);
+        }
 
         // ── 1. Background ─────────────────────────────────────────────────────
-        var absBg  = ResolveStoragePath(request.StorageRootPath, request.BackgroundSourcePath);
-        using var bgCanvas = await LoadBackgroundWithCropAsync(absBg, cw, ch, BgCropEntry.Parse(request.BgCropJson), ct);
-        var bgUri  = await ToDataUriAsync(bgCanvas, ct);
-        svg.AppendLine($"""  <image x="0" y="0" width="{cw}" height="{ch}" preserveAspectRatio="none" href="{bgUri}"/>""");
+        var absBg = ResolveStoragePath(request.StorageRootPath, request.BackgroundSourcePath);
+        var (bgCanvas, bgRect) = await LoadBackgroundWithCropAsync(absBg, cw, ch, BgCropEntry.Parse(request.BgCropJson), ct, transparentFill: true);
+        using (bgCanvas)
+        {
+            var bgUri = await ToDataUriAsync(bgCanvas, ct);
+            // Embed only the content rect to avoid encoding transparent padding.
+            svg.AppendLine($"""  <image x="{bgRect.X}" y="{bgRect.Y}" width="{bgRect.Width}" height="{bgRect.Height}" preserveAspectRatio="none" xlink:href="{bgUri}"/>""");
+        }
+        Expand(bgRect.X, bgRect.Y, bgRect.Width, bgRect.Height);
 
         // ── 2. Subject ────────────────────────────────────────────────────────
         if (request.SubjectCutoutPath is not null && slots.Count > 0)
@@ -123,14 +142,14 @@ public sealed class ComposerEngine : IComposerEngine
                     using (cropped)
                     {
                         var subUri = await ToDataUriAsync(cropped, ct);
-                        // Emit <defs> with clip path for non-rect shapes
                         const string clipId = "slot_clip_0";
                         var clipPathSvg = BuildSvgClipPath(clipId, slot, cw, ch, dstX, dstY, drawW, drawH);
                         if (clipPathSvg is not null)
                             svg.AppendLine($"""  <defs>{clipPathSvg}</defs>""");
                         var clipAttr = clipPathSvg is not null ? $""" clip-path="url(#{clipId})" """ : " ";
-                        svg.AppendLine($"""  <image x="{dstX}" y="{dstY}" width="{drawW}" height="{drawH}"{clipAttr}href="{subUri}"/>""");
+                        svg.AppendLine($"""  <image x="{dstX}" y="{dstY}" width="{drawW}" height="{drawH}"{clipAttr}xlink:href="{subUri}"/>""");
                     }
+                    Expand(dstX, dstY, drawW, drawH);
                 }
             }
             else
@@ -140,11 +159,16 @@ public sealed class ComposerEngine : IComposerEngine
         }
 
         // ── 3. Text zones ─────────────────────────────────────────────────────
-        AppendSvgTextZones(svg, request.TextZonesJson, request.TextConfigJson, cw, ch);
+        AppendSvgTextZones(svg, request.TextZonesJson, request.TextConfigJson, request.TextStyleOverridesJson, cw, ch);
 
         svg.AppendLine("</svg>");
 
-        // ── 4. Save SVG ───────────────────────────────────────────────────────
+        // ── 4. Compute tight viewBox and save ─────────────────────────────────
+        // Fall back to full canvas if no content was measured.
+        if (maxX <= minX || maxY <= minY) { minX = 0; minY = 0; maxX = cw; maxY = ch; }
+        var viewBox   = $"{minX} {minY} {maxX - minX} {maxY - minY}";
+        var svgOutput = svg.ToString().Replace(vbPlaceholder, viewBox);
+
         var exportDir     = Path.Combine(request.StorageRootPath, "exports");
         Directory.CreateDirectory(exportDir);
 
@@ -152,7 +176,7 @@ public sealed class ComposerEngine : IComposerEngine
         var absOutputPath = Path.Combine(exportDir, fileName);
         var relOutputPath = $"storage/exports/{fileName}";
 
-        await File.WriteAllTextAsync(absOutputPath, svg.ToString(), ct);
+        await File.WriteAllTextAsync(absOutputPath, svgOutput, ct);
         _logger.LogInformation("SVG export written → {RelPath}", relOutputPath);
 
         return new ComposeResult(
@@ -174,94 +198,89 @@ public sealed class ComposerEngine : IComposerEngine
         SubjectSlot slot,
         CropStateEntry cropState,
         int cw, int ch,
-        CancellationToken ct)
+        CancellationToken ct,
+        bool logDetails = false)
     {
-        var subject = await Image.LoadAsync<Rgba32>(absSubjectPath, ct);
-        try
-        {
-            var (cropX, cropY, cropW, cropH) = LayoutCalculator.ToPixels(slot.Rect, cw, ch);
-            cropW = Math.Max(1, cropW);
-            cropH = Math.Max(1, cropH);
+        using var subject = await Image.LoadAsync<Rgba32>(absSubjectPath, ct);
 
-            int srcW = subject.Width;
-            int srcH = subject.Height;
+        // Apply EXIF orientation so the backend matches browser auto-orientation
+        subject.Mutate(ctx => ctx.AutoOrient());
 
-            // ── Derive crop window in source-image space ──────────────────────
-            //
-            // coverScale = scale that makes the source just cover the slot.
-            // finalScale = coverScale × user-scale.
-            // imgLeft/Top = top-left of the scaled source within the slot viewport.
-            // Projecting the slot back into source space gives the crop window.
-            //
-            double coverScale = Math.Max((double)cropW / srcW, (double)cropH / srcH);
-            double finalScale = coverScale * Math.Max(0.01, cropState.Scale);
+        var (cropX, cropY, cropW, cropH) = LayoutCalculator.ToPixels(slot.Rect, cw, ch);
+        cropW = Math.Max(1, cropW);
+        cropH = Math.Max(1, cropH);
 
-            double panX = cropState.OffsetX * cropW;
-            double panY = cropState.OffsetY * cropH;
+        int srcW = subject.Width;
+        int srcH = subject.Height;
 
-            double imgLeft = (cropW - srcW * finalScale) / 2.0 + panX;
-            double imgTop  = (cropH - srcH * finalScale) / 2.0 + panY;
+        // ── Step 1: Scale ─────────────────────────────────────────────────────
+        //
+        // containScale = maximum scale so the source fits entirely within the slot
+        //   (same as CSS `max-width: 100%; max-height: 100%` on the subject <img>).
+        // At scale=1.0 the full cutout is visible; scale>1 zooms in (edges clip);
+        // scale<1 shrinks further — remaining slot area stays transparent.
+        //
+        double containScale = Math.Min((double)cropW / srcW, (double)cropH / srcH);
+        double finalScale = containScale * Math.Max(0.01, cropState.Scale);
 
-            double wX = -imgLeft / finalScale;
-            double wY = -imgTop  / finalScale;
-            double wW =  cropW   / finalScale;
-            double wH =  cropH   / finalScale;
+        int scaledW = Math.Max(1, (int)Math.Round(srcW * finalScale));
+        int scaledH = Math.Max(1, (int)Math.Round(srcH * finalScale));
+        subject.Mutate(ctx => ctx.Resize(scaledW, scaledH));
 
-            // ── Clamp crop window to source bounds ────────────────────────────
-            double cX = Math.Max(0.0, wX);
-            double cY = Math.Max(0.0, wY);
-            double cW = Math.Min(wW - (cX - wX), srcW - cX);
-            double cH = Math.Min(wH - (cY - wY), srcH - cY);
+        // ── Step 2: Pan ───────────────────────────────────────────────────────
+        //
+        // panX/panY in slot pixels — mirrors CSS `translate(panX px, panY px)`.
+        // The scaled image is centred in the slot, then offset by the user pan.
+        //
+        double panX = cropState.OffsetX * cropW;
+        double panY = cropState.OffsetY * cropH;
 
-            if (cW < 1 || cH < 1) { subject.Dispose(); return (null, 0, 0); }
+        // Top-left corner of the scaled image within the slot viewport
+        int imgLeft = (int)Math.Round((cropW - scaledW) / 2.0 + panX);
+        int imgTop  = (int)Math.Round((cropH - scaledH) / 2.0 + panY);
 
-            int iCX = (int)Math.Round(cX);
-            int iCY = (int)Math.Round(cY);
-            int iCW = Math.Max(1, (int)Math.Round(cW));
-            int iCH = Math.Max(1, (int)Math.Round(cH));
-            iCW = Math.Min(iCW, srcW - iCX);
-            iCH = Math.Min(iCH, srcH - iCY);
-            if (iCW < 1 || iCH < 1) { subject.Dispose(); return (null, 0, 0); }
+        // ── Step 3: Clip to slot viewport ─────────────────────────────────────
+        //
+        // Determine the rectangle in the scaled image that overlaps the slot.
+        //
+        int clipX = Math.Max(0, -imgLeft);
+        int clipY = Math.Max(0, -imgTop);
+        int clipW = Math.Min(scaledW - clipX, cropW - Math.Max(0, imgLeft));
+        int clipH = Math.Min(scaledH - clipY, cropH - Math.Max(0, imgTop));
 
-            subject.Mutate(ctx => ctx.Crop(new Rectangle(iCX, iCY, iCW, iCH)));
+        if (clipW <= 0 || clipH <= 0)
+            return (null, 0, 0);
 
-            // ── Scale cropped region to fill slot ─────────────────────────────
-            //
-            // Fully contained → aspect ratios match → Stretch fills slot exactly.
-            // Clamped (scale < 1 or excessive pan) → letterbox to avoid distortion.
-            //
-            bool fullyContained = cX <= wX + 0.5 && cY <= wY + 0.5 &&
-                                  cX + cW >= wX + wW - 0.5 &&
-                                  cY + cH >= wY + wH - 0.5;
+        subject.Mutate(ctx => ctx.Crop(new Rectangle(clipX, clipY, clipW, clipH)));
 
-            subject.Mutate(ctx => ctx.Resize(new ResizeOptions
-            {
-                Size = new Size(cropW, cropH),
-                Mode = fullyContained ? ResizeMode.Stretch : ResizeMode.Max,
-            }));
+        // ── Step 4: Composite into full slot-sized transparent canvas ─────────
+        //
+        // Always produce a cropW × cropH image so:
+        //   (a) the shape mask is applied over the full slot dimensions, and
+        //   (b) unfilled areas (extreme pan / zoom-out) are transparent pixels
+        //       rather than leaking background colour.
+        //
+        var slotCanvas = new Image<Rgba32>(cropW, cropH, Color.Transparent);
+        int pasteX = Math.Max(0, imgLeft);
+        int pasteY = Math.Max(0, imgTop);
+        slotCanvas.Mutate(ctx => ctx.DrawImage(subject, new Point(pasteX, pasteY), 1f));
+        // subject is disposed by `using` at end of method
 
-            int dstX = cropX + (cropW - subject.Width)  / 2;
-            int dstY = cropY + (cropH - subject.Height) / 2;
+        // Apply non-rectangular shape mask (ellipse / polygon)
+        ApplyShapeMask(slotCanvas, slot, cw, ch, cropX, cropY);
 
-            // Apply non-rectangular shape mask (ellipse / polygon)
-            ApplyShapeMask(subject, slot, cw, ch, dstX, dstY);
-
+        if (logDetails)
             _logger.LogInformation(
-                "Subject cropped — slot({CX},{CY},{CW},{CH}) src({SW}×{SH}) " +
-                "scale={Scale:F2} cropWin=({WX:F1},{WY:F1},{WW:F1}×{WH:F1}) " +
-                "clamped=({IX},{IY},{IW}×{IH}) dst=({DX},{DY}) mode={Mode}",
+                "Subject placed — slot({CX},{CY},{CW},{CH}) src({SW}×{SH}) " +
+                "containScale={Contain:F3} userScale={User:F2} finalScale={Final:F3} " +
+                "scaled=({ScW}×{ScH}) pan=({PX:F1},{PY:F1}) " +
+                "imgTopLeft=({IL},{IT}) clip=({ClX},{ClY},{ClW}×{ClH}) dst=({DX},{DY})",
                 cropX, cropY, cropW, cropH, srcW, srcH,
-                cropState.Scale, wX, wY, wW, wH,
-                iCX, iCY, iCW, iCH, dstX, dstY,
-                fullyContained ? "Stretch" : "Letterbox");
+                containScale, cropState.Scale, finalScale,
+                scaledW, scaledH, panX, panY,
+                imgLeft, imgTop, clipX, clipY, clipW, clipH, cropX, cropY);
 
-            return (subject, dstX, dstY);
-        }
-        catch
-        {
-            subject.Dispose();
-            throw;
-        }
+        return (slotCanvas, cropX, cropY);
     }
 
     // ── PNG helpers ───────────────────────────────────────────────────────────
@@ -271,24 +290,32 @@ public sealed class ComposerEngine : IComposerEngine
     /// (cover-scale × user scale + offset), and returns a canvas-sized image.
     /// Falls back to a solid grey canvas when the file is missing.
     /// </summary>
-    private async Task<Image<Rgba32>> LoadBackgroundWithCropAsync(
-        string absPath, int cw, int ch, BgCropEntry crop, CancellationToken ct)
+    private async Task<(Image<Rgba32> Canvas, Rectangle ContentRect)> LoadBackgroundWithCropAsync(
+        string absPath, int cw, int ch, BgCropEntry crop, CancellationToken ct,
+        bool logDetails = false, bool transparentFill = false)
     {
+        var fillColor = transparentFill ? Color.Transparent.ToPixel<Rgba32>() : new Rgba32(220, 220, 220);
         if (!File.Exists(absPath))
         {
             _logger.LogWarning("Background not found: {Path} — using grey fallback.", absPath);
-            return new Image<Rgba32>(cw, ch, new Rgba32(220, 220, 220));
+            return (new Image<Rgba32>(cw, ch, fillColor), new Rectangle(0, 0, cw, ch));
         }
 
         var src = await Image.LoadAsync<Rgba32>(absPath, ct);
         try
         {
-            // Cover scale: image just fills the canvas; multiply by user scale
-            double coverScale = Math.Max((double)cw / src.Width, (double)ch / src.Height);
-            double finalScale = coverScale * Math.Max(0.01, crop.Scale);
+            // Capture original dimensions before resize for accurate logging
+            int origSrcW = src.Width;
+            int origSrcH = src.Height;
 
-            int scaledW = Math.Max(1, (int)Math.Round(src.Width  * finalScale));
-            int scaledH = Math.Max(1, (int)Math.Round(src.Height * finalScale));
+            // Contain scale: image fits entirely within canvas — matches CSS object-contain used
+            // in CropEditor and DesignCanvas so Admin bgCrop offsets map correctly.
+            // bgCrop.Scale=1.0 → exact contain; >1 zooms in further.
+            double containScale = Math.Min((double)cw / origSrcW, (double)ch / origSrcH);
+            double finalScale = containScale * Math.Max(0.01, crop.Scale);
+
+            int scaledW = Math.Max(1, (int)Math.Round(origSrcW * finalScale));
+            int scaledH = Math.Max(1, (int)Math.Round(origSrcH * finalScale));
 
             src.Mutate(ctx => ctx.Resize(scaledW, scaledH));
 
@@ -304,13 +331,27 @@ public sealed class ComposerEngine : IComposerEngine
             int visW = Math.Min(scaledW - srcX, cw - dstX);
             int visH = Math.Min(scaledH - srcY, ch - dstY);
 
-            var canvas = new Image<Rgba32>(cw, ch, new Rgba32(220, 220, 220));
+            if (logDetails)
+                _logger.LogInformation(
+                    "Background placed — canvas({CW}×{CH}) src({SW}×{SH}) " +
+                    "coverScale={Cover:F3} bgCropScale={BgS:F3} finalScale={Final:F3} " +
+                    "scaled=({ScW}×{ScH}) offset=({OX:F3},{OY:F3}) " +
+                    "imgTopLeft=({IX},{IY}) vis=({SX},{SY},{VW}×{VH}) dst=({DX},{DY})",
+                    cw, ch, origSrcW, origSrcH,
+                    containScale, crop.Scale, finalScale,
+                    scaledW, scaledH, crop.OffsetX, crop.OffsetY,
+                    imgX, imgY, srcX, srcY, visW, visH, dstX, dstY);
+
+            var canvas = new Image<Rgba32>(cw, ch, fillColor);
             if (visW > 0 && visH > 0)
             {
                 using var cropped = src.Clone(ctx => ctx.Crop(new Rectangle(srcX, srcY, visW, visH)));
                 canvas.Mutate(ctx => ctx.DrawImage(cropped, new Point(dstX, dstY), 1f));
             }
-            return canvas;
+            var contentRect = visW > 0 && visH > 0
+                ? new Rectangle(dstX, dstY, visW, visH)
+                : new Rectangle(0, 0, cw, ch);
+            return (canvas, contentRect);
         }
         finally
         {
@@ -319,13 +360,14 @@ public sealed class ComposerEngine : IComposerEngine
     }
 
     /// <summary>
-    /// Renders title / subtitle / footer text at the zones defined in TextZonesJson.
-    /// Silently skips rendering when fonts or zone data are unavailable.
+    /// Renders text at the zones defined in TextZonesJson, applying per-zone typography
+    /// from the zone defaults merged with optional user overrides.
     /// </summary>
     private void RenderTextZones(
         Image<Rgba32> canvas,
         string? textZonesJson,
         string? textConfigJson,
+        string? textStyleOverridesJson,
         int cw, int ch)
     {
         if (string.IsNullOrWhiteSpace(textZonesJson) ||
@@ -346,10 +388,7 @@ public sealed class ComposerEngine : IComposerEngine
         }
 
         TextZoneDto[]? zones;
-        try
-        {
-            zones = JsonSerializer.Deserialize<TextZoneDto[]>(textZonesJson, _jsonOpts);
-        }
+        try { zones = JsonSerializer.Deserialize<TextZoneDto[]>(textZonesJson, _jsonOpts); }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Failed to parse TextZonesJson — skipping text rendering.");
@@ -357,59 +396,199 @@ public sealed class ComposerEngine : IComposerEngine
         }
         if (zones is null || zones.Length == 0) return;
 
-        FontFamily? fontFamily = null;
-        foreach (var name in new[] { "Arial", "Helvetica", "DejaVu Sans", "Liberation Sans", "Segoe UI", "Tahoma" })
+        var overrides = ParseStyleOverrides(textStyleOverridesJson);
+
+        foreach (var zone in zones)
         {
-            if (SystemFonts.TryGet(name, out var ff)) { fontFamily = ff; break; }
+            textValues.TryGetValue(zone.Id, out var text);
+            text = string.IsNullOrWhiteSpace(text) ? zone.DefaultText ?? "" : text;
+            if (string.IsNullOrWhiteSpace(text)) continue;
+
+            var ov = overrides.GetValueOrDefault(zone.Id);
+
+            int zx = (int)Math.Round(zone.X * cw);
+            int zy = (int)Math.Round(zone.Y * ch);
+            int zw = Math.Max(1, (int)Math.Round(zone.W * cw));
+            int zh = Math.Max(1, (int)Math.Round(zone.H * ch));
+
+            // Resolve effective style (zone default → user override)
+            double effectiveFontSize = ov?.FontSize    ?? zone.FontSize;
+            string effectiveFontName = ov?.FontFamily  ?? zone.FontFamily;
+            string effectiveColor    = ov?.Color       ?? zone.Color;
+            double effectiveStrokeW  = ov?.StrokeWidth ?? zone.StrokeWidth;
+            string effectiveStrokeC  = ov?.StrokeColor ?? zone.StrokeColor;
+            string effectiveAlign    = ov?.Align       ?? zone.Align;
+
+            // Resolve font
+            FontFamily? ff = null;
+            foreach (var name in new[] { effectiveFontName, "Arial", "Helvetica", "DejaVu Sans", "Liberation Sans", "Segoe UI", "Tahoma" })
+            {
+                if (!string.IsNullOrWhiteSpace(name) && SystemFonts.TryGet(name, out var found))
+                { ff = found; break; }
+            }
+            if (ff is null) { _logger.LogWarning("No system font found — skipping zone {Id}.", zone.Id); continue; }
+
+            float fSize = Math.Max(8f, (float)(zh * effectiveFontSize / 100.0));
+            var font = ff.Value.CreateFont(fSize,
+                zone.Id == "title" ? FontStyle.Bold : FontStyle.Regular);
+
+            var fillColor   = ParseColor(effectiveColor,   Color.White);
+            var strokeColor = ParseColor(effectiveStrokeC, Color.Black);
+            float strokePx  = effectiveStrokeW > 0
+                ? Math.Max(0.5f, (float)(fSize * effectiveStrokeW / 100.0)) : 0f;
+
+            // ── Arc text ──────────────────────────────────────────────────────
+            if (zone.ArcEnabled)
+            {
+                RenderArcText(canvas, text, font, fillColor, strokeColor, strokePx,
+                    zx, zy, zw, zh, zone.ArcRx, zone.ArcRy, zone.ArcDirection == "up", cw, ch);
+                continue;
+            }
+
+            // ── Straight text ─────────────────────────────────────────────────
+            var hAlign = effectiveAlign switch
+            {
+                "left"  => HorizontalAlignment.Left,
+                "right" => HorizontalAlignment.Right,
+                _       => HorizontalAlignment.Center,
+            };
+            float originX = effectiveAlign switch
+            {
+                "left"  => zx,
+                "right" => zx + zw,
+                _       => zx + zw / 2f,
+            };
+            var origin = new PointF(originX, zy + zh / 2f);
+            var opts = new RichTextOptions(font)
+            {
+                Origin              = origin,
+                HorizontalAlignment = hAlign,
+                VerticalAlignment   = VerticalAlignment.Center,
+                WrappingLength      = zw,
+            };
+
+            canvas.Mutate(ctx =>
+            {
+                if (strokePx > 0)
+                {
+                    ctx.DrawText(opts, text, Brushes.Solid(fillColor), Pens.Solid(strokeColor, strokePx));
+                }
+                else
+                {
+                    var shadowOpts = new RichTextOptions(font)
+                    {
+                        Origin              = new PointF(origin.X + 2, origin.Y + 2),
+                        HorizontalAlignment = hAlign,
+                        VerticalAlignment   = VerticalAlignment.Center,
+                        WrappingLength      = zw,
+                    };
+                    ctx.DrawText(shadowOpts, text, Color.FromRgba(0, 0, 0, 180));
+                    ctx.DrawText(opts, text, fillColor);
+                }
+            });
         }
-        if (fontFamily is null)
+    }
+
+    /// <summary>
+    /// Renders text along a circular arc by placing each glyph at the correct
+    /// arc position and rotation angle.
+    /// </summary>
+    private void RenderArcText(
+        Image<Rgba32> canvas,
+        string text,
+        Font font,
+        Color fillColor,
+        Color strokeColor,
+        float strokePx,
+        int zx, int zy, int zw, int zh,
+        double arcRx, double arcRy, bool arcUp,
+        int cw, int ch)
+    {
+        double halfW = zw / 2.0;
+        double Rx    = Math.Max(halfW + 1.0, arcRx * ch);   // horizontal semi-axis
+        double Ry    = Math.Max(1.0,          arcRy * ch);   // vertical semi-axis
+        double cx    = zx + zw / 2.0;
+        double cy    = zy + zh / 2.0;
+        // Ellipse centre is directly above/below zone centre by Ry
+        double eccy  = arcUp ? cy + Ry : cy - Ry;
+
+        // Measure per-character positions along the straight baseline
+        var measOpts = new TextOptions(font) { Origin = PointF.Empty };
+        if (!TextMeasurer.TryMeasureCharacterBounds(text, measOpts, out ReadOnlySpan<GlyphBounds> charBounds)
+            || charBounds.IsEmpty)
         {
-            _logger.LogWarning("No suitable system font found — skipping text rendering.");
+            // Fallback: straight text at zone centre
+            canvas.Mutate(ctx => ctx.DrawText(
+                new RichTextOptions(font)
+                {
+                    Origin = new PointF((float)cx, (float)cy),
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                    VerticalAlignment   = VerticalAlignment.Center,
+                }, text, fillColor));
             return;
         }
 
-        canvas.Mutate(ctx =>
+        float totalWidth = charBounds[^1].Bounds.Right;
+        int   sz         = (int)(font.Size * 3f) + 8;
+
+        foreach (var cb in charBounds)
         {
-            foreach (var zone in zones)
+            if (cb.StringIndex < 0 || cb.StringIndex >= text.Length) continue;
+            string charStr = text[cb.StringIndex].ToString();
+
+            // Map baseline x-offset → ellipse point
+            float  charCenter = cb.Bounds.Left + cb.Bounds.Width / 2f;
+            double d          = Math.Clamp(charCenter - totalWidth / 2.0, -Rx, Rx);
+            double sqrtTerm   = Math.Sqrt(Math.Max(0.0, 1.0 - (d / Rx) * (d / Rx)));
+
+            double charX = cx + d;
+            double charY = arcUp
+                ? eccy - Ry * sqrtTerm   // upper arc: above ellipse centre
+                : eccy + Ry * sqrtTerm;  // lower arc: below ellipse centre
+
+            // Tangent rotation: d(x,y)/dt at this point on the ellipse
+            // For 'up'  (upper arc, θ ∈ (-π,0)): rot = atan2( Ry*(d/Rx),  Rx*sqrtTerm)
+            // For 'down'(lower arc, θ ∈ (0,π)) : rot = atan2(-Ry*(d/Rx),  Rx*sqrtTerm)
+            double rotRad = arcUp
+                ? Math.Atan2( Ry * (d / Rx), Rx * sqrtTerm)
+                : Math.Atan2(-Ry * (d / Rx), Rx * sqrtTerm);
+            float  rotDeg = (float)(rotRad * 180.0 / Math.PI);
+
+            // Draw single glyph onto a transparent square, then rotate and composite
+            using var tmp = new Image<Rgba32>(sz, sz, Color.Transparent);
+            var charOpts = new RichTextOptions(font)
             {
-                textValues.TryGetValue(zone.Id, out var text);
-                text ??= "";
-                if (string.IsNullOrWhiteSpace(text)) continue;
+                Origin              = new PointF(sz / 2f, sz / 2f),
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment   = VerticalAlignment.Center,
+            };
 
-                int zx = (int)Math.Round(zone.X * cw);
-                int zy = (int)Math.Round(zone.Y * ch);
-                int zw = Math.Max(1, (int)Math.Round(zone.W * cw));
-                int zh = Math.Max(1, (int)Math.Round(zone.H * ch));
-
-                float fontSize = Math.Max(8f, zh * 0.60f);
-                var font = fontFamily.Value.CreateFont(fontSize,
-                    zone.Id == "title" ? FontStyle.Bold : FontStyle.Regular);
-
-                var center = new PointF(zx + zw / 2f, zy + zh / 2f);
-
-                ctx.DrawText(
-                    new RichTextOptions(font)
-                    {
-                        Origin              = new PointF(center.X + 2, center.Y + 2),
-                        HorizontalAlignment = HorizontalAlignment.Center,
-                        VerticalAlignment   = VerticalAlignment.Center,
-                        WrappingLength      = zw,
-                    },
-                    text,
-                    Color.FromRgba(0, 0, 0, 180));
-
-                ctx.DrawText(
-                    new RichTextOptions(font)
-                    {
-                        Origin              = center,
-                        HorizontalAlignment = HorizontalAlignment.Center,
-                        VerticalAlignment   = VerticalAlignment.Center,
-                        WrappingLength      = zw,
-                    },
-                    text,
-                    Color.White);
+            if (strokePx > 0)
+            {
+                tmp.Mutate(c2 => c2.DrawText(charOpts, charStr,
+                    Brushes.Solid(fillColor), Pens.Solid(strokeColor, strokePx)));
             }
-        });
+            else
+            {
+                var shadowOpts = new RichTextOptions(font)
+                {
+                    Origin              = new PointF(sz / 2f + 2, sz / 2f + 2),
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                    VerticalAlignment   = VerticalAlignment.Center,
+                };
+                tmp.Mutate(c2 =>
+                {
+                    c2.DrawText(shadowOpts, charStr, Color.FromRgba(0, 0, 0, 180));
+                    c2.DrawText(charOpts,   charStr, fillColor);
+                });
+            }
+
+            tmp.Mutate(c2 => c2.Rotate(rotDeg));
+
+            int pasteX = (int)Math.Round(charX - tmp.Width  / 2.0);
+            int pasteY = (int)Math.Round(charY - tmp.Height / 2.0);
+            canvas.Mutate(c2 => c2.DrawImage(tmp, new Point(pasteX, pasteY), 1f));
+        }
     }
 
     // ── SVG helpers ───────────────────────────────────────────────────────────
@@ -449,13 +628,14 @@ public sealed class ComposerEngine : IComposerEngine
     }
 
     /// <summary>
-    /// Appends SVG &lt;text&gt; elements for each defined text zone.
-    /// Each zone gets a semi-transparent drop-shadow and a white foreground text element.
+    /// Appends SVG &lt;text&gt; elements for each defined text zone,
+    /// merging zone defaults with optional per-zone user style overrides.
     /// </summary>
-    private static void AppendSvgTextZones(
+    private void AppendSvgTextZones(
         StringBuilder svg,
         string? textZonesJson,
         string? textConfigJson,
+        string? textStyleOverridesJson,
         int cw, int ch)
     {
         if (string.IsNullOrWhiteSpace(textZonesJson) || string.IsNullOrWhiteSpace(textConfigJson))
@@ -471,42 +651,142 @@ public sealed class ComposerEngine : IComposerEngine
         catch { return; }
 
         TextZoneDto[]? zones;
-        try
-        {
-            zones = JsonSerializer.Deserialize<TextZoneDto[]>(textZonesJson, _jsonOpts);
-        }
+        try { zones = JsonSerializer.Deserialize<TextZoneDto[]>(textZonesJson, _jsonOpts); }
         catch { return; }
         if (zones is null || zones.Length == 0) return;
+
+        var overrides = ParseStyleOverrides(textStyleOverridesJson);
 
         foreach (var zone in zones)
         {
             textValues.TryGetValue(zone.Id, out var text);
+            text = string.IsNullOrWhiteSpace(text) ? zone.DefaultText ?? "" : text;
             if (string.IsNullOrWhiteSpace(text)) continue;
+
+            var ov = overrides.GetValueOrDefault(zone.Id);
 
             int zx = (int)Math.Round(zone.X * cw);
             int zy = (int)Math.Round(zone.Y * ch);
             int zw = Math.Max(1, (int)Math.Round(zone.W * cw));
             int zh = Math.Max(1, (int)Math.Round(zone.H * ch));
 
-            float fontSize  = Math.Max(8f, zh * 0.60f);
-            string weight   = zone.Id == "title" ? "bold" : "normal";
-            string fontAttr = $"font-family=\"Arial, Helvetica, sans-serif\" font-size=\"{fontSize:F0}\" font-weight=\"{weight}\" text-anchor=\"middle\" dominant-baseline=\"middle\"";
+            double effectiveFontSize = ov?.FontSize    ?? zone.FontSize;
+            string effectiveFontName = ov?.FontFamily  ?? zone.FontFamily;
+            string effectiveColor    = ov?.Color       ?? zone.Color;
+            double effectiveStrokeW  = ov?.StrokeWidth ?? zone.StrokeWidth;
+            string effectiveStrokeC  = ov?.StrokeColor ?? zone.StrokeColor;
+            string effectiveAlign    = ov?.Align       ?? zone.Align;
 
-            int cx = zx + zw / 2;
+            float fontSize = Math.Max(8f, (float)(zh * effectiveFontSize / 100.0));
+            string weight  = zone.Id == "title" ? "bold" : "normal";
+
+            var (textAnchor, cx) = effectiveAlign switch
+            {
+                "left"  => ("start",  zx),
+                "right" => ("end",    zx + zw),
+                _       => ("middle", zx + zw / 2),
+            };
             int cy = zy + zh / 2;
 
-            // XML-escape text content
-            var escaped = text
-                .Replace("&", "&amp;")
-                .Replace("<", "&lt;")
-                .Replace(">", "&gt;")
-                .Replace("\"", "&quot;");
+            string fontAttr = $"font-family=\"{XmlEscape(effectiveFontName)}, Arial, sans-serif\" " +
+                              $"font-size=\"{fontSize:F0}\" font-weight=\"{weight}\" " +
+                              $"text-anchor=\"{textAnchor}\" dominant-baseline=\"middle\"";
 
-            // Drop shadow
-            svg.AppendLine($"""  <text x="{cx + 2}" y="{cy + 2}" {fontAttr} fill="#000000" fill-opacity="0.7">{escaped}</text>""");
-            // Foreground
-            svg.AppendLine($"""  <text x="{cx}" y="{cy}" {fontAttr} fill="#ffffff">{escaped}</text>""");
+            var escaped = XmlEscape(text);
+
+            if (zone.ArcEnabled)
+            {
+                // ── Arc text via SVG textPath ────────────────────────────────
+                bool   arcUp    = zone.ArcDirection != "down";
+                double halfW_px = zw / 2.0;
+                double zoneCx   = zx + zw / 2.0;
+                double Rx_px    = Math.Max(halfW_px + 1.0, zone.ArcRx * ch);
+                double Ry_px    = Math.Max(1.0,             zone.ArcRy * ch);
+
+                double ratio    = Math.Min(1.0, halfW_px / Rx_px);
+                double yOff     = Ry_px * (1.0 - Math.Sqrt(1.0 - ratio * ratio));
+                double arcSy    = arcUp ? cy + yOff : cy - yOff;
+                double arcSx    = zoneCx - halfW_px;
+                double arcEx    = zoneCx + halfW_px;
+                int    sweep    = arcUp ? 0 : 1;
+
+                string arcD   = $"M {arcSx:F1},{arcSy:F1} A {Rx_px:F1},{Ry_px:F1} 0 0 {sweep} {arcEx:F1},{arcSy:F1}";
+                string pathId = $"arc_{XmlEscape(zone.Id)}";
+
+                string fontAttrsArc = $"font-family=\"{XmlEscape(effectiveFontName)}, Arial, sans-serif\" " +
+                                      $"font-size=\"{fontSize:F0}\" font-weight=\"{weight}\" text-anchor=\"middle\"";
+
+                svg.AppendLine($"""  <defs><path id="{pathId}" d="{arcD}"/></defs>""");
+
+                if (effectiveStrokeW > 0)
+                {
+                    float strokePx = Math.Max(0.5f, (float)(fontSize * effectiveStrokeW / 100.0));
+                    svg.AppendLine($"""  <text {fontAttrsArc} fill="{effectiveColor}" stroke="{effectiveStrokeC}" stroke-width="{strokePx:F1}" paint-order="stroke">""");
+                    svg.AppendLine($"""    <textPath href="#{pathId}" startOffset="50%">{escaped}</textPath>""");
+                    svg.AppendLine($"""  </text>""");
+                }
+                else
+                {
+                    // Shadow path offset by (2,2)
+                    string shadowId = $"arc_sh_{XmlEscape(zone.Id)}";
+                    string shadowD  = $"M {arcSx + 2:F1},{arcSy + 2:F1} A {Rx_px:F1},{Ry_px:F1} 0 0 {sweep} {arcEx + 2:F1},{arcSy + 2:F1}";
+                    svg.AppendLine($"""  <defs><path id="{shadowId}" d="{shadowD}"/></defs>""");
+                    svg.AppendLine($"""  <text {fontAttrsArc} fill="#000000" fill-opacity="0.7">""");
+                    svg.AppendLine($"""    <textPath href="#{shadowId}" startOffset="50%">{escaped}</textPath>""");
+                    svg.AppendLine($"""  </text>""");
+                    svg.AppendLine($"""  <text {fontAttrsArc} fill="{effectiveColor}">""");
+                    svg.AppendLine($"""    <textPath href="#{pathId}" startOffset="50%">{escaped}</textPath>""");
+                    svg.AppendLine($"""  </text>""");
+                }
+            }
+            else
+            {
+                // ── Straight text ────────────────────────────────────────────
+                if (effectiveStrokeW > 0)
+                {
+                    float strokePx = Math.Max(0.5f, (float)(fontSize * effectiveStrokeW / 100.0));
+                    svg.AppendLine($"""  <text x="{cx}" y="{cy}" {fontAttr} fill="{effectiveColor}" stroke="{effectiveStrokeC}" stroke-width="{strokePx:F1}">{escaped}</text>""");
+                }
+                else
+                {
+                    // Drop shadow + fill
+                    svg.AppendLine($"""  <text x="{cx + 2}" y="{cy + 2}" {fontAttr} fill="#000000" fill-opacity="0.7">{escaped}</text>""");
+                    svg.AppendLine($"""  <text x="{cx}" y="{cy}" {fontAttr} fill="{effectiveColor}">{escaped}</text>""");
+                }
+            }
         }
+    }
+
+    private static string XmlEscape(string text) =>
+        text.Replace("&", "&amp;").Replace("<", "&lt;").Replace(">", "&gt;").Replace("\"", "&quot;");
+
+    /// <summary>Parses a CSS hex color string ('#rrggbb' or '#rrggbbaa'). Falls back to <paramref name="fallback"/>.</summary>
+    private static Color ParseColor(string? hex, Color fallback)
+    {
+        if (string.IsNullOrWhiteSpace(hex)) return fallback;
+        if (Color.TryParse(hex, out var c)) return c;
+        return fallback;
+    }
+
+    /// <summary>
+    /// Parses TextStyleOverridesJson into a lookup dictionary keyed by zone id.
+    /// Returns an empty dictionary when json is null or malformed.
+    /// </summary>
+    private Dictionary<string, TextStyleOverrideDto> ParseStyleOverrides(string? json)
+    {
+        var result = new Dictionary<string, TextStyleOverrideDto>(StringComparer.OrdinalIgnoreCase);
+        if (string.IsNullOrWhiteSpace(json)) return result;
+        try
+        {
+            var parsed = JsonSerializer.Deserialize<Dictionary<string, TextStyleOverrideDto>>(json, _jsonOpts);
+            if (parsed is not null)
+                foreach (var kv in parsed) result[kv.Key] = kv.Value;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to parse TextStyleOverridesJson — using zone defaults.");
+        }
+        return result;
     }
 
     // ── Shared helpers ────────────────────────────────────────────────────────
@@ -553,11 +833,14 @@ public sealed class ComposerEngine : IComposerEngine
     {
         if (slot.Shape == "ellipse")
         {
-            // Ellipse centred and inscribed within the image bounding box
+            // Ellipse inscribed within the SLOT bounding box (not the image bounding box).
+            // Using slot dimensions ensures a consistent shape regardless of letterboxing,
+            // matching the CSS `ellipse(50% 50% at 50% 50%)` clip applied to the slot div.
+            var (_, _, slotW, slotH) = LayoutCalculator.ToPixels(slot.Rect, cw, ch);
             float cx = img.Width  / 2f;
             float cy = img.Height / 2f;
-            float rx = img.Width  / 2f;
-            float ry = img.Height / 2f;
+            float rx = slotW / 2f;
+            float ry = slotH / 2f;
             img.ProcessPixelRows(accessor =>
             {
                 for (int y = 0; y < img.Height; y++)
@@ -615,9 +898,15 @@ public sealed class ComposerEngine : IComposerEngine
     {
         if (slot.Shape == "ellipse")
         {
-            int cx = dstX + drawW / 2;
-            int cy = dstY + drawH / 2;
-            return $"""<clipPath id="{id}"><ellipse cx="{cx}" cy="{cy}" rx="{drawW / 2}" ry="{drawH / 2}"/></clipPath>""";
+            // Use slot pixel dimensions for rx/ry (not image dimensions) so the ellipse
+            // inscribed in the SVG matches the CSS `ellipse(50% 50% at 50% 50%)` applied
+            // to the slot div — consistent with ApplyShapeMask.
+            var (_, _, slotW, slotH) = LayoutCalculator.ToPixels(slot.Rect, cw, ch);
+            double cx = dstX + drawW / 2.0;
+            double cy = dstY + drawH / 2.0;
+            double rx = slotW / 2.0;
+            double ry = slotH / 2.0;
+            return $"""<clipPath id="{id}"><ellipse cx="{cx:F1}" cy="{cy:F1}" rx="{rx:F1}" ry="{ry:F1}"/></clipPath>""";
         }
         if (slot.Shape == "polygon" && slot.Points is { Length: >= 3 })
         {
@@ -634,11 +923,31 @@ public sealed class ComposerEngine : IComposerEngine
         double X,
         double Y,
         double W,
-        double H);
+        double H,
+        string? DefaultText    = null,
+        double  FontSize       = 50,      // % of zone height
+        string  FontFamily     = "Arial",
+        string  Color          = "#ffffff",
+        double  StrokeWidth    = 0,       // % of zone height
+        string  StrokeColor    = "#000000",
+        string  Align          = "center",
+        bool    ArcEnabled     = false,
+        double  ArcRx          = 0.7,     // horizontal semi-axis, fraction of canvas height
+        double  ArcRy          = 0.5,     // vertical semi-axis, fraction of canvas height
+        string  ArcDirection   = "up");   // "up" or "down"
+
+    /// <summary>Per-zone typography overrides supplied by the user in Step 6.</summary>
+    private sealed record TextStyleOverrideDto(
+        double?  FontSize    = null,
+        string?  FontFamily  = null,
+        string?  Color       = null,
+        double?  StrokeWidth = null,
+        string?  StrokeColor = null,
+        string?  Align       = null);
 
     /// <summary>
     /// Background crop transform parsed from BgCropJson.
-    /// Scale=1 = cover-fit; offset fractions of canvas size (0 = centred).
+    /// Scale=1 = contain-fit (full image visible); offset fractions of canvas size (0 = centred).
     /// </summary>
     private sealed record BgCropEntry(double Scale, double OffsetX, double OffsetY)
     {

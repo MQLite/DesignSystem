@@ -16,7 +16,9 @@ public record ComposePreviewRequest(
     /// <summary>Serialised CanvasLayout JSON from the frontend interactive editor.</summary>
     string? CanvasLayoutJson,
     /// <summary>Serialised SubjectCropState[] — user's pan/zoom within each crop frame. Null when not adjusted.</summary>
-    string? SubjectCropStateJson);
+    string? SubjectCropStateJson,
+    /// <summary>Serialised per-zone typography overrides: Record&lt;zoneId, TextZoneStyle&gt;.</summary>
+    string? TextStyleOverridesJson = null);
 
 public record ComposePreviewResponse(
     string PreviewRelativePath,
@@ -93,6 +95,7 @@ public sealed class ComposeController : ControllerBase
             TextConfigJson = request.TextConfigJson ?? "{}",
             UserAdjustmentsJson = request.CanvasLayoutJson,
             SubjectCropStateJson = request.SubjectCropStateJson,
+            TextStyleOverridesJson = request.TextStyleOverridesJson,
             BgCropJson = layout.BgCropJson,
             TargetDpi = previewDpi,
             CanvasWidthPx = canvasW,
@@ -148,6 +151,7 @@ public sealed class ComposeController : ControllerBase
             TextConfigJson = request.TextConfigJson ?? "{}",
             UserAdjustmentsJson = request.CanvasLayoutJson,
             SubjectCropStateJson = request.SubjectCropStateJson,
+            TextStyleOverridesJson = request.TextStyleOverridesJson,
             BgCropJson = layout.BgCropJson,
             TargetDpi = exportDpi,
             CanvasWidthPx = canvasW,
