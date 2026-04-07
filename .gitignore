@@ -3,7 +3,9 @@
 data/
 storage/
 .vscode/
-.claude/
+.claude/*
+!.claude/memory/
+!.claude/memory/**
 *.user
 *.suo
 appsettings.Development.json
